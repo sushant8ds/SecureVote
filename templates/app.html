@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light" />
+  <title>{{ app_name }}</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+  <link rel="preload" href="/static/fonts/public-sans-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="stylesheet" href="/static/css/app.css?v=ui-12" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <a href="/" class="wordmark">
+        <svg class="wordmark-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7"/><path d="M9.5 16.5l4.5 4.5 8.5-10"/></svg>
+        <span>{{ app_name }}</span>
+      </a>
+      <div class="header-side">
+        <span id="conn-badge" class="conn hidden" role="status"></span>
+        <nav class="header-nav" id="nav-auth" aria-label="Account"></nav>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap main">
+    <!-- Sign in -->
+    <section id="view-login" class="view auth">
+      <div class="auth-panel">
+        <h1 id="login-title">Sign in</h1>
+        <p class="lede" id="login-lede">Vote in student elections with your university email.</p>
+
+        <div class="segmented" id="role-switch" role="tablist" aria-label="Account type">
+          <button type="button" class="seg is-active" role="tab" aria-selected="true" data-tab="voter">Voter</button>
+          <button type="button" class="seg" role="tab" aria-selected="false" data-tab="admin">Administrator</button>
+        </div>
+
+        <form id="form-voter-login" class="form" autocomplete="on">
+          <div id="login-step-credentials" class="form-fields">
+            <label class="field">
+              <span class="field-label">University email</span>
+              <input name="voter_id" type="email" required autocomplete="username" placeholder="you@umsystem.edu" />
+            </label>
+            <label class="field">
+              <span class="field-label">Password</span>
+              <input name="password" type="password" required autocomplete="current-password" />
+            </label>
+            <button type="submit" class="btn btn-primary btn-block">Continue</button>
+          </div>
+
+          <div id="login-step-otp" class="form-fields hidden">
+            <p class="otp-note">We sent a 6-digit code to <strong id="otp-sent-to"></strong>. <span id="otp-expiry"></span></p>
+            <div id="otp-demo" class="callout hidden">
+              <p>Demo mode: email is off, so the code is shown here.</p>
+              <p class="otp-demo-row"><code id="otp-demo-code"></code> <button type="button" class="btn-link" id="otp-demo-fill">Use this code</button></p>
+            </div>
+            <label class="field">
+              <span class="field-label">Verification code</span>
+              <input name="otp" class="input-code" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="one-time-code" required disabled />
+            </label>
+            <button type="submit" class="btn btn-primary btn-block">Verify and sign in</button>
+            <button type="button" class="btn-link" id="otp-back">Use a different account</button>
+          </div>
+        </form>
+
+        <form id="form-admin-login" class="form hidden" autocomplete="on">
+          <div id="admin-first-run-banner" class="callout callout-warn hidden">
+            <p>No administrator account exists yet.</p>
+            <button type="button" class="btn-link" id="btn-go-admin-setup">Create the first administrator</button>
+          </div>
+          <div class="form-fields">
+            <label class="field">
+              <span class="field-label">Username</span>
+              <input name="username" required autocomplete="username" />
+            </label>
+            <label class="field">
+              <span class="field-label">Password</span>
+              <input name="password" type="password" required autocomplete="current-password" />
+            </label>
+            <button type="submit" class="btn btn-primary btn-block">Sign in</button>
+          </div>
+        </form>
+
+        <p class="auth-alt" id="register-prompt">First time voting? <button type="button" class="btn-link" id="link-register">Create an account</button></p>
+      </div>
+    </section>
+
+    <!-- First administrator -->
+    <section id="view-admin-setup" class="view auth hidden">
+      <div class="auth-panel">
+        <h1>Create administrator</h1>
+        <p class="lede">This account manages elections, voter access and results.</p>
+        <form id="form-admin-first" class="form">
+          <div class="form-fields">
+            <label class="field">
+              <span class="field-label">Username</span>
+              <input name="username" required minlength="3" maxlength="64" pattern="[a-zA-Z0-9_\-]+" autocomplete="username" />
+              <span class="field-hint">Letters, numbers, hyphens and underscores.</span>
+            </label>
+            <label class="field">
+              <span class="field-label">Password</span>
+              <input name="password" type="password" required minlength="8" autocomplete="new-password" />
+              <span class="field-hint">At least 8 characters.</span>
+            </label>
+            <button type="submit" class="btn btn-primary btn-block">Create administrator</button>
+          </div>
+        </form>
+        <p class="auth-alt"><button type="button" class="btn-link" id="link-admin-setup-back">Back to sign in</button></p>
+      </div>
+    </section>
+
+    <!-- Register -->
+    <section id="view-register" class="view auth hidden">
+      <div class="auth-panel">
+        <h1>Create your account</h1>
+        <p class="lede">Only email addresses on the university's voter list can register.</p>
+        <form id="form-register" class="form">
+          <div class="form-fields">
+            <label class="field">
+              <span class="field-label">University email</span>
+              <input name="voter_id" type="email" required autocomplete="username" placeholder="you@umsystem.edu" />
+            </label>
+            <label class="field">
+              <span class="field-label">Password</span>
+              <input name="password" type="password" required minlength="8" autocomplete="new-password" />
+              <span class="field-hint">At least 8 characters.</span>
+            </label>
+            <button type="submit" class="btn btn-primary btn-block">Create account</button>
+          </div>
+        </form>
+        <p class="fineprint">Creating an account also creates a signing key for your ballots. The key is made in this browser and stays on this device.</p>
+        <p class="auth-alt">Already registered? <button type="button" class="btn-link" id="link-back-login">Sign in</button></p>
+      </div>
+    </section>
+
+    <!-- Voter -->
+    <section id="view-voter" class="view hidden">
+      <div class="page-head">
+        <h1>Elections</h1>
+        <p class="lede" id="voter-welcome"></p>
+      </div>
+
+      <div id="voter-key-banner" class="callout callout-warn hidden">
+        <p><strong>This browser doesn't have your signing key.</strong> That happens after clearing site data or switching browsers. Enter your password to create a new one. Votes you already cast stay valid.</p>
+        <form id="form-restore-key" class="inline-form">
+          <label class="field">
+            <span class="field-label">Password</span>
+            <input type="password" name="password" required autocomplete="current-password" />
+          </label>
+          <button type="submit" class="btn btn-primary">Create new key</button>
+        </form>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button type="button" class="tab is-active" role="tab" data-vtab="elections">Elections</button>
+        <button type="button" class="tab" role="tab" data-vtab="results">Results</button>
+      </div>
+      <div id="v-panel-elections" class="panel"></div>
+      <div id="v-panel-results" class="panel hidden"></div>
+    </section>
+
+    <!-- Admin -->
+    <section id="view-admin" class="view hidden">
+      <div class="page-head">
+        <h1>Administration</h1>
+        <p class="lede" id="admin-welcome-line"></p>
+      </div>
+
+      <dl id="admin-stats" class="stats" aria-live="polite"></dl>
+
+      <div class="tabs" role="tablist">
+        <button type="button" class="tab is-active" role="tab" data-atab="elections">Elections</button>
+        <button type="button" class="tab" role="tab" data-atab="requests">Access requests <span id="badge-approvals" class="count hidden">0</span></button>
+        <button type="button" class="tab" role="tab" data-atab="create">New election</button>
+      </div>
+
+      <div id="a-panel-elections" class="panel"></div>
+      <div id="a-panel-requests" class="panel hidden"></div>
+      <div id="a-panel-create" class="panel hidden">
+        <form id="form-create-election" class="form form-wide">
+          <label class="field">
+            <span class="field-label">Title</span>
+            <input name="title" required placeholder="Class representative 2026" />
+          </label>
+          <label class="field field-narrow">
+            <span class="field-label">Who can vote</span>
+            <select name="category" required>
+              <option value="class">A class</option>
+              <option value="department">A department</option>
+              <option value="campus">The whole campus</option>
+            </select>
+          </label>
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">Voting opens</span>
+              <input name="starts_at" type="datetime-local" required />
+            </label>
+            <label class="field">
+              <span class="field-label">Voting closes</span>
+              <input name="ends_at" type="datetime-local" required />
+            </label>
+          </div>
+          <p class="field-hint">Times are in your local time zone.</p>
+
+          <fieldset class="fieldset">
+            <legend>Candidates</legend>
+            <p class="field-hint">Each candidate needs a name and a photo (JPEG, PNG or WebP, up to 2 MB).</p>
+            <div id="contestant-rows"></div>
+            <button type="button" class="btn btn-small" id="btn-add-contestant">Add candidate</button>
+          </fieldset>
+
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Create election</button>
+          </div>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <footer class="wrap site-footer">
+    <p>Ballots are encrypted and signed in your browser before they are sent. Votes are decrypted only when an election is tallied.</p>
+  </footer>
+
+  <dialog id="dialog" class="dialog">
+    <form method="dialog">
+      <h2 id="dialog-title"></h2>
+      <div id="dialog-body" class="dialog-body"></div>
+      <div class="dialog-actions">
+        <button type="submit" value="cancel" class="btn" id="dialog-cancel">Cancel</button>
+        <button type="submit" value="ok" class="btn btn-primary" id="dialog-ok">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <template id="tpl-contestant-row">
+    <div class="contestant-row">
+      <label class="field">
+        <span class="field-label">Name</span>
+        <input type="text" class="c-name" required />
+      </label>
+      <label class="field">
+        <span class="field-label">Photo</span>
+        <input type="file" class="c-photo" accept="image/png,image/jpeg,image/webp" required />
+      </label>
+      <button type="button" class="btn-link btn-link-danger rm-row">Remove</button>
+    </div>
+  </template>
+
+  <script src="/static/js/vendor/forge.min.js"></script>
+  <script defer src="/static/js/app.js?v=ui-12"></script>
+</body>
+</html>
