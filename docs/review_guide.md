@@ -254,7 +254,7 @@ The ballot is encrypted in the browser before the vote request is sent. The serv
 2. **Voter to administrator:** voters can request access but cannot approve themselves.
 3. **Open election to closed election:** ballots can be submitted only while an election is active.
 4. **Closed election to published result:** the administrator must close and tally before voters see counts.
-5. **Configuration to application:** allowlists, JWT secrets, admin credentials, OTP mode, and database paths come from configuration.
+5. **Configuration to application:** the voter roster file, JWT secrets, admin credentials, OTP mode, and database paths come from configuration.
 
 ### Current review/demo configuration
 
@@ -265,7 +265,7 @@ The local project runs with development defaults when no `.env` file is present:
 - Admin username: `admin`
 - Admin password: `admin-change-me`
 - OTP mode: demo
-- Default allowlisted users: four `@umsystem.edu` addresses
+- Default roster: four demo students with `@umsystem.edu` addresses and made-up ID details (`config/voter_roster.csv`)
 
 These values are for the local academic demonstration only and must be changed for deployment.
 
@@ -297,7 +297,7 @@ Contains the application API and most workflow rules.
 Responsibilities:
 
 - Defines Pydantic request models.
-- Normalizes and allowlist-checks voter emails.
+- Normalizes voter emails, checks them against the voter roster, and verifies ID-card details at registration.
 - Handles voter registration and login.
 - Issues and validates OTPs.
 - Handles administrator login and first-admin setup.
@@ -341,12 +341,12 @@ Runs at application startup. It:
 - Performs legacy schema migrations.
 - Adds the configured administrator if needed.
 - Synchronizes the configured admin password when enabled.
-- Removes voter rows that are no longer on the configured allowlist.
+- Imports the voter roster CSV when it changes, removes voter rows no longer on the roster (keeping any with ballots), and re-wraps election keys that still used the old default secret.
 - Logs startup and migration events.
 
 #### `src/config.py`
 
-Loads configuration from `.env` and environment variables using Pydantic Settings. It controls database paths, JWT settings, administrator credentials, allowlisted emails, OTP behavior, SMTP configuration, and election defaults.
+Loads configuration from `.env` and environment variables using Pydantic Settings. It controls database paths, JWT settings, administrator credentials, the voter roster file, OTP behavior, SMTP configuration, and election defaults.
 
 #### `templates/app.html`
 
@@ -406,7 +406,7 @@ Contains unit and API tests.
 - `test_crypto_service.py` checks RSA key generation, bcrypt, OAEP, SHA-256, RSA-PSS, tampering, and wrong-key failures.
 - `test_api.py` checks registration, OTP login, election creation, approval, voting, duplicate-vote blocking, invalid signatures, closing, publishing, key restoration, and authorization.
 - `helpers.py` creates test elections and test ballots.
-- `conftest.py` isolates tests in temporary databases and configures test allowlists/secrets.
+- `conftest.py` isolates tests in temporary databases and writes a test voter roster and configures secrets.
 
 #### `docs/`
 
@@ -425,7 +425,7 @@ Contains the design and security explanation used to justify the implementation:
 2. The browser generates the voter RSA-2048 key pair with WebCrypto.
 3. The browser sends `POST /api/register` with email, password, and the public key.
 4. The server normalizes the email to lowercase.
-5. The server checks the `@umsystem.edu` format and configured allowlist.
+5. The server checks that the email is on the voter roster and that the Aadhaar / college ID details, name and date of birth match the roster entry.
 6. The server validates the public key (RSA, at least 2048 bits).
 7. The server hashes the password with bcrypt.
 8. The server stores the voter ID, password hash, and public key in `voters`.
@@ -644,7 +644,7 @@ Use this sequence during the live review. It keeps the explanation aligned with 
 
 ### Part B: Demonstrate the voter
 
-- Use an allowlisted email such as `bayd6@umsystem.edu`.
+- Use a roster email such as `bayd6@umsystem.edu` with the matching ID details from `config/voter_roster.csv`.
 - Register or sign in.
 - Explain that registration stores a bcrypt password hash and voter public key.
 - Show the demo OTP step.

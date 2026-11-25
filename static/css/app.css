@@ -1288,21 +1288,23 @@ td.actions .btn + .btn {
   text-transform: uppercase;
 }
 
-.sev-high {
+.sev.sev-high {
   background: var(--danger-tint);
   color: var(--danger);
 }
 
-.sev-medium {
+.sev.sev-medium {
   background: var(--warn-tint);
   color: var(--warn);
 }
 
-.sev-low {
+.sev.sev-low {
   background: var(--paper);
   color: var(--ink-2);
 }
 
+.is-reviewed .sev.sev-high,
+.is-reviewed .sev.sev-medium,
 .is-reviewed .sev {
   background: var(--paper);
   color: var(--ink-3);
