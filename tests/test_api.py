@@ -1,6 +1,6 @@
 """API tests for multi-election flow and /api routes."""
 
-from tests.helpers import build_ballot_contestant, create_test_election, iso_timestamp
+from tests.helpers import build_ballot_contestant, create_test_election, identity_for, iso_timestamp
 
 
 def voter_login_token(client, voter_id: str, password: str) -> str:
@@ -17,7 +17,7 @@ def voter_login_token(client, voter_id: str, password: str) -> str:
 
 def test_register_login_vote_results_flow(client):
     voter_id = "v1@umsystem.edu"
-    r = client.post("/api/register", json={"voter_id": voter_id, "password": "password12"})
+    r = client.post("/api/register", json={"voter_id": voter_id, "password": "password12", **identity_for(voter_id)})
     assert r.status_code == 201
     priv = r.json()["voter_private_key_pem"]
 
@@ -66,14 +66,14 @@ def test_register_login_vote_results_flow(client):
 
 
 def test_double_registration_conflict(client):
-    client.post("/api/register", json={"voter_id": "dup@umsystem.edu", "password": "password12"})
-    r = client.post("/api/register", json={"voter_id": "dup@umsystem.edu", "password": "password12"})
+    client.post("/api/register", json={"voter_id": "dup@umsystem.edu", "password": "password12", **identity_for("dup@umsystem.edu")})
+    r = client.post("/api/register", json={"voter_id": "dup@umsystem.edu", "password": "password12", **identity_for("dup@umsystem.edu")})
     assert r.status_code == 409
 
 
 def test_admin_delete_voter_then_register_again(client):
     assert (
-        client.post("/api/register", json={"voter_id": "deleting@umsystem.edu", "password": "firstpass12"}).status_code
+        client.post("/api/register", json={"voter_id": "deleting@umsystem.edu", "password": "firstpass12", **identity_for("deleting@umsystem.edu")}).status_code
         == 201
     )
     adm = client.post(
@@ -85,22 +85,22 @@ def test_admin_delete_voter_then_register_again(client):
         json={"voter_id": "deleting@umsystem.edu"},
     )
     assert r.status_code == 200
-    r2 = client.post("/api/register", json={"voter_id": "deleting@umsystem.edu", "password": "secondpass12"})
+    r2 = client.post("/api/register", json={"voter_id": "deleting@umsystem.edu", "password": "secondpass12", **identity_for("deleting@umsystem.edu")})
     assert r2.status_code == 201
 
 
-def test_reject_non_allowlisted_email(client):
-    r = client.post("/api/register", json={"voter_id": "other@umsystem.edu", "password": "password12"})
+def test_reject_email_not_on_roster(client):
+    r = client.post("/api/register", json={"voter_id": "other@umsystem.edu", "password": "password12", **identity_for("other@umsystem.edu")})
     assert r.status_code == 403
 
 
 def test_register_precheck_rejects_unknown_email(client):
     r = client.post("/api/register/precheck", json={"voter_id": "ertyu8i@umsystem.edu"})
     assert r.status_code == 403
-    assert "authorized" in r.json().get("detail", "").lower()
+    assert "roster" in r.json().get("detail", "").lower()
 
 
-def test_register_precheck_ok_for_allowlisted_email(client):
+def test_register_precheck_ok_for_roster_email(client):
     r = client.post("/api/register/precheck", json={"voter_id": "v1@umsystem.edu"})
     assert r.status_code == 200
     body = r.json()
@@ -108,13 +108,13 @@ def test_register_precheck_ok_for_allowlisted_email(client):
     assert body.get("voter_id") == "v1@umsystem.edu"
 
 
-def test_voter_jwt_rejected_when_sub_not_on_allowlist(client):
+def test_voter_jwt_rejected_when_sub_not_on_roster(client):
     from src.auth_tokens import create_access_token
 
     bad_tok = create_access_token("intruder@umsystem.edu", "voter")
     r = client.get("/api/elections", headers={"Authorization": f"Bearer {bad_tok}"})
     assert r.status_code == 403
-    assert "authorized" in r.json().get("detail", "").lower()
+    assert "roster" in r.json().get("detail", "").lower()
 
 
 def test_elections_no_auth_still_returns_list(client):
@@ -128,7 +128,7 @@ def test_elections_garbage_bearer_returns_401(client):
 
 def test_voter_session_returns_sub(client):
     assert (
-        client.post("/api/register", json={"voter_id": "v1@umsystem.edu", "password": "password12"}).status_code
+        client.post("/api/register", json={"voter_id": "v1@umsystem.edu", "password": "password12", **identity_for("v1@umsystem.edu")}).status_code
         == 201
     )
     tok = voter_login_token(client, "v1@umsystem.edu", "password12")
@@ -139,7 +139,7 @@ def test_voter_session_returns_sub(client):
 
 def test_double_vote_blocked(client):
     voter_id = "twice@umsystem.edu"
-    reg = client.post("/api/register", json={"voter_id": voter_id, "password": "password12"}).json()
+    reg = client.post("/api/register", json={"voter_id": voter_id, "password": "password12", **identity_for(voter_id)}).json()
     priv = reg["voter_private_key_pem"]
     tok = voter_login_token(client, voter_id, "password12")
     adm = client.post(
@@ -164,7 +164,7 @@ def test_double_vote_blocked(client):
 
 def test_invalid_signature_rejected(client):
     voter_id = "sig@umsystem.edu"
-    reg = client.post("/api/register", json={"voter_id": voter_id, "password": "password12"}).json()
+    reg = client.post("/api/register", json={"voter_id": voter_id, "password": "password12", **identity_for(voter_id)}).json()
     priv = reg["voter_private_key_pem"]
     tok = voter_login_token(client, voter_id, "password12")
     adm = client.post(
@@ -204,7 +204,7 @@ def test_vote_requires_auth(client):
 
 
 def test_publish_forbidden_before_close(client):
-    client.post("/api/register", json={"voter_id": "t1@umsystem.edu", "password": "password12"})
+    client.post("/api/register", json={"voter_id": "t1@umsystem.edu", "password": "password12", **identity_for("t1@umsystem.edu")})
     admin = client.post(
         "/api/admin/login", json={"username": "admin", "password": "test-admin-password"}
     ).json()["access_token"]
@@ -233,7 +233,7 @@ def test_admin_register_first_forbidden_after_seed(client):
 
 def test_restore_signing_key_ok_before_any_vote(client):
     voter_id = "rekey1@umsystem.edu"
-    client.post("/api/register", json={"voter_id": voter_id, "password": "password12"})
+    client.post("/api/register", json={"voter_id": voter_id, "password": "password12", **identity_for(voter_id)})
     tok = voter_login_token(client, voter_id, "password12")
     h = {"Authorization": f"Bearer {tok}"}
     r = client.post("/api/voter/restore-signing-key", headers=h, json={"password": "password12"})
@@ -243,7 +243,7 @@ def test_restore_signing_key_ok_before_any_vote(client):
 
 def test_restore_signing_key_wrong_password(client):
     voter_id = "rekey2@umsystem.edu"
-    client.post("/api/register", json={"voter_id": voter_id, "password": "password12"})
+    client.post("/api/register", json={"voter_id": voter_id, "password": "password12", **identity_for(voter_id)})
     tok = voter_login_token(client, voter_id, "password12")
     r = client.post(
         "/api/voter/restore-signing-key",
@@ -256,7 +256,7 @@ def test_restore_signing_key_wrong_password(client):
 def test_restore_signing_key_after_vote_allows_second_election_and_tally(client):
     """Ballots store voter public key at cast time; rotating keys does not break older tallies."""
     voter_id = "rekey3@umsystem.edu"
-    reg = client.post("/api/register", json={"voter_id": voter_id, "password": "password12"}).json()
+    reg = client.post("/api/register", json={"voter_id": voter_id, "password": "password12", **identity_for(voter_id)}).json()
     priv1 = reg["voter_private_key_pem"]
     tok = voter_login_token(client, voter_id, "password12")
     h = {"Authorization": f"Bearer {tok}"}
@@ -320,7 +320,7 @@ def test_admin_election_stats_requires_admin(client):
 
 def _approved_voter(client, voter_id: str, public_key_pem: str | None = None):
     """Register + login a voter, create an election, approve them. Returns (priv, headers, admin_headers, eid, detail)."""
-    body = {"voter_id": voter_id, "password": "password12"}
+    body = {"voter_id": voter_id, "password": "password12", **identity_for(voter_id)}
     if public_key_pem:
         body["public_key_pem"] = public_key_pem
     reg = client.post("/api/register", json=body)
@@ -357,7 +357,12 @@ def test_register_with_client_generated_key_never_returns_private_key(client):
 def test_register_rejects_bad_public_key(client):
     r = client.post(
         "/api/register",
-        json={"voter_id": "v1@umsystem.edu", "password": "password12", "public_key_pem": "not a key"},
+        json={
+            "voter_id": "v1@umsystem.edu",
+            "password": "password12",
+            "public_key_pem": "not a key",
+            **identity_for("v1@umsystem.edu"),
+        },
     )
     assert r.status_code == 400
 
@@ -385,7 +390,7 @@ def test_backdated_timestamp_rejected(client):
 
 def test_otp_burned_after_too_many_wrong_guesses(client):
     voter_id = "v1@umsystem.edu"
-    client.post("/api/register", json={"voter_id": voter_id, "password": "password12"})
+    client.post("/api/register", json={"voter_id": voter_id, "password": "password12", **identity_for(voter_id)})
     step1 = client.post("/api/login", json={"voter_id": voter_id, "password": "password12"}).json()
     real = step1["dev_otp"]
     wrong = "000000" if real != "000000" else "111111"

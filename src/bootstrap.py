@@ -5,9 +5,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from cryptography.exceptions import InvalidTag
+
 from src.config import settings
-from src.crypto_service import hash_password, is_wrapped_private_key, wrap_private_key
-from src.database import audit_log, get_connection, init_schema
+from src.crypto_service import hash_password, is_wrapped_private_key, unwrap_private_key, wrap_private_key
+from src.database import audit_log, get_connection, get_meta, init_schema, set_meta
+from src.identity import import_roster_file
+from src.secrets_store import DEFAULT_JWT_SECRET
 
 logger = logging.getLogger("voting")
 
@@ -16,15 +20,15 @@ def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _prune_voters_not_on_allowlist(conn) -> None:
-    """Remove voter rows whose email is not in ``STUDENT_EMAIL_ALLOWLIST``.
+def _prune_voters_not_on_roster(conn) -> None:
+    """Remove voter rows whose email is no longer on the voter roster.
 
     Voters who already cast a ballot are kept: deleting them would cascade to ``election_votes`` and
-    silently change a tally. They still cannot sign in, because the allowlist is checked on every request.
+    silently change a tally. They still cannot sign in, because the roster is checked on every request.
     """
-    allowed = settings.allowed_student_emails()
+    allowed = {r["email"] for r in conn.execute("SELECT email FROM voter_roster").fetchall()}
     if not allowed:
-        logger.warning("STUDENT_EMAIL_ALLOWLIST is empty — not pruning voters (misconfiguration risk).")
+        logger.warning("The voter roster is empty: no student can register (not pruning voters).")
         return
     rows = conn.execute("SELECT voter_id FROM voters").fetchall()
     removed = 0
@@ -40,13 +44,13 @@ def _prune_voters_not_on_allowlist(conn) -> None:
             removed += 1
     if kept:
         logger.warning(
-            "%s voter(s) are no longer on the allowlist but have recorded ballots; rows kept so tallies stay intact",
+            "%s voter(s) are no longer on the roster but have recorded ballots; rows kept so tallies stay intact",
             kept,
         )
     if removed:
         conn.commit()
-        audit_log(conn, "voters_pruned_allowlist", f"removed {removed} voter(s) not on STUDENT_EMAIL_ALLOWLIST")
-        logger.info("Removed %s voter row(s) not on the current allowlist", removed)
+        audit_log(conn, "voters_pruned_roster", f"removed {removed} voter(s) not on the voter roster")
+        logger.info("Removed %s voter row(s) not on the voter roster", removed)
 
 
 def _encrypt_plaintext_election_keys(conn) -> None:
@@ -64,11 +68,53 @@ def _encrypt_plaintext_election_keys(conn) -> None:
         logger.info("Encrypted %s election private key(s) at rest", n)
 
 
+def _rewrap_keys_from_old_secrets(conn) -> None:
+    """Election keys used to be wrapped with JWT_SECRET, which defaulted to a value printed in the repo.
+
+    Re-wrap every key that still opens with one of those old secrets under the current key-encryption
+    secret, so a stolen database cannot be decrypted with a value anyone can read on GitHub. Runs once.
+    """
+    if get_meta(conn, "key_wrap_secret_v2"):
+        return
+    current = settings.key_wrap_secret()
+    legacy = [s for s in dict.fromkeys([settings.jwt_secret, DEFAULT_JWT_SECRET]) if s and s != current]
+    moved = stuck = 0
+    for r in conn.execute("SELECT id, private_key_pem FROM elections").fetchall():
+        stored = r["private_key_pem"]
+        if not is_wrapped_private_key(stored):
+            continue
+        try:
+            unwrap_private_key(stored, current)
+            continue
+        except InvalidTag:
+            pass
+        for old in legacy:
+            try:
+                pem = unwrap_private_key(stored, old)
+            except InvalidTag:
+                continue
+            conn.execute(
+                "UPDATE elections SET private_key_pem = ? WHERE id = ?", (wrap_private_key(pem, current), r["id"])
+            )
+            moved += 1
+            break
+        else:
+            stuck += 1
+            logger.error("Election %s: private key does not open with the current secret; it cannot be tallied", r["id"])
+    conn.commit()
+    set_meta(conn, "key_wrap_secret_v2", "1")
+    if moved:
+        audit_log(conn, "election_keys_rewrapped", f"{moved} key(s) moved off the old JWT-derived secret")
+        logger.info("Re-wrapped %s election key(s) under the current key-encryption secret", moved)
+
+
 def ensure_bootstrap(db_path, admin_plain_password: str, _starts_at: str | None, _ends_at: str | None) -> None:
     with get_connection(db_path) as conn:
         init_schema(conn)
-        _prune_voters_not_on_allowlist(conn)
+        import_roster_file(conn, settings.voter_roster_file, settings.identity_secret())
+        _prune_voters_not_on_roster(conn)
         _encrypt_plaintext_election_keys(conn)
+        _rewrap_keys_from_old_secrets(conn)
         un = settings.admin_username.strip() or "admin"
         n = conn.execute("SELECT COUNT(*) AS c FROM admins").fetchone()["c"]
         ph = hash_password(admin_plain_password)

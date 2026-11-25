@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 
 import uvicorn
 
@@ -21,12 +22,30 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("voting")
 
 
-def make_redirect_app(https_port: int):
-    """ASGI app: answer every plain-HTTP request with a permanent redirect to the HTTPS origin."""
+def exposes_secrets(scope) -> bool:
+    """A plain-HTTP API request that carries a body or a bearer token has already leaked it on the wire."""
+    if not scope.get("path", "").startswith("/api"):
+        return False
+    headers = dict(scope.get("headers", []))
+    has_body = headers.get(b"content-length", b"0") not in (b"", b"0") or b"transfer-encoding" in headers
+    return scope.get("method", "GET") not in ("GET", "HEAD") or has_body or b"authorization" in headers
+
+
+def make_redirect_app(https_port: int, on_cleartext: Callable[[dict], None] | None = None):
+    """ASGI app: answer every plain-HTTP request with a permanent redirect to the HTTPS origin.
+
+    The request is never processed. If it was an API call carrying credentials or a token,
+    ``on_cleartext(scope)`` is called so the administrator can be alerted.
+    """
 
     async def app(scope, receive, send):
         if scope["type"] != "http":
             return
+        if on_cleartext and exposes_secrets(scope):
+            try:
+                on_cleartext(scope)
+            except Exception:  # an alerting failure must never break the redirect
+                logger.exception("Could not record the plain-HTTP alert")
         host = "127.0.0.1"
         for k, v in scope.get("headers", []):
             if k == b"host":
@@ -57,6 +76,22 @@ def make_redirect_app(https_port: int):
     return app
 
 
+def alert_cleartext_request(scope) -> None:
+    from src.alerts import record_alert
+    from src.database import get_connection
+
+    client = scope.get("client") or (None, None)
+    with get_connection(settings.db_file()) as conn:
+        record_alert(
+            conn,
+            "plaintext_http",
+            detail=f"{scope.get('method')} {scope.get('path')} arrived on plain-HTTP port {settings.http_redirect_port} "
+            "with a body or token, readable by anyone on the network. It was not processed; the client was sent to HTTPS.",
+            detected_by=f"HTTP port {settings.http_redirect_port}",
+            source_ip=client[0],
+        )
+
+
 def main() -> None:
     if settings.tls_cert_file and settings.tls_key_file:
         cert, key = str(settings.tls_cert_file), str(settings.tls_key_file)
@@ -82,7 +117,7 @@ def main() -> None:
     if settings.http_redirect_port:
         redirect = uvicorn.Server(
             uvicorn.Config(
-                make_redirect_app(settings.https_port),
+                make_redirect_app(settings.https_port, alert_cleartext_request),
                 host=settings.host,
                 port=settings.http_redirect_port,
                 log_level="warning",

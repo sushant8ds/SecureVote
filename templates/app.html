@@ -7,9 +7,32 @@
   <title>{{ app_name }}</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
   <link rel="preload" href="/static/fonts/public-sans-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
-  <link rel="stylesheet" href="/static/css/app.css?v=ui-12" />
+  <link rel="stylesheet" href="/static/css/app.css?v=ui-13" />
 </head>
 <body>
+{% macro identity_fields() %}
+          <fieldset class="id-fieldset">
+            <legend>Identity check</legend>
+            <p class="field-hint">These are compared with the college record for your email.</p>
+            <div class="choice" role="radiogroup" aria-label="ID card">
+              <label><input type="radio" name="id_type" value="aadhaar" checked /> Aadhaar card</label>
+              <label><input type="radio" name="id_type" value="college_id" /> College ID card</label>
+            </div>
+            <label class="field">
+              <span class="field-label" data-id-label>Aadhaar number</span>
+              <input name="id_number" required autocomplete="off" spellcheck="false" inputmode="numeric" maxlength="14" placeholder="1234 5678 9012" />
+              <span class="field-hint" data-id-hint>12 digits, as printed on the card.</span>
+            </label>
+            <label class="field">
+              <span class="field-label">Full name, as on the card</span>
+              <input name="full_name" required autocomplete="name" maxlength="120" />
+            </label>
+            <label class="field">
+              <span class="field-label">Date of birth</span>
+              <input name="date_of_birth" type="date" required />
+            </label>
+          </fieldset>
+{% endmacro %}
   <header class="site-header">
     <div class="wrap header-inner">
       <a href="/" class="wordmark">
@@ -113,7 +136,7 @@
     <section id="view-register" class="view auth hidden">
       <div class="auth-panel">
         <h1>Create your account</h1>
-        <p class="lede">Only email addresses on the university's voter list can register.</p>
+        <p class="lede">Only students on the college voter roster can register, and the details must match your ID card.</p>
         <form id="form-register" class="form">
           <div class="form-fields">
             <label class="field">
@@ -125,10 +148,11 @@
               <input name="password" type="password" required minlength="8" autocomplete="new-password" />
               <span class="field-hint">At least 8 characters.</span>
             </label>
+{{ identity_fields() }}
             <button type="submit" class="btn btn-primary btn-block">Create account</button>
           </div>
         </form>
-        <p class="fineprint">Creating an account also creates a signing key for your ballots. The key is made in this browser and stays on this device.</p>
+        <p class="fineprint">Your ID number is only compared with the college record. It is not stored. Creating an account also makes a signing key for your ballots in this browser; it stays on this device.</p>
         <p class="auth-alt">Already registered? <button type="button" class="btn-link" id="link-back-login">Sign in</button></p>
       </div>
     </section>
@@ -151,6 +175,16 @@
         </form>
       </div>
 
+      <div id="voter-id-banner" class="callout callout-warn hidden">
+        <p><strong>Verify your identity to take part.</strong> Your account was created before identity checks were added. Enter the details from your Aadhaar card or college ID card once.</p>
+        <form id="form-verify-identity" class="form id-inline">
+          <div class="form-fields">
+{{ identity_fields() }}
+            <button type="submit" class="btn btn-primary">Verify identity</button>
+          </div>
+        </form>
+      </div>
+
       <div class="tabs" role="tablist">
         <button type="button" class="tab is-active" role="tab" data-vtab="elections">Elections</button>
         <button type="button" class="tab" role="tab" data-vtab="results">Results</button>
@@ -166,16 +200,60 @@
         <p class="lede" id="admin-welcome-line"></p>
       </div>
 
+      <div id="admin-alert-banner" class="alert-banner hidden" role="alert">
+        <p id="admin-alert-text"></p>
+        <button type="button" class="btn btn-small" id="admin-alert-review">Review</button>
+      </div>
+
       <dl id="admin-stats" class="stats" aria-live="polite"></dl>
 
       <div class="tabs" role="tablist">
         <button type="button" class="tab is-active" role="tab" data-atab="elections">Elections</button>
         <button type="button" class="tab" role="tab" data-atab="requests">Access requests <span id="badge-approvals" class="count hidden">0</span></button>
+        <button type="button" class="tab" role="tab" data-atab="alerts">Security alerts <span id="badge-alerts" class="count count-danger hidden">0</span></button>
+        <button type="button" class="tab" role="tab" data-atab="roster">Voter roster</button>
         <button type="button" class="tab" role="tab" data-atab="create">New election</button>
       </div>
 
       <div id="a-panel-elections" class="panel"></div>
       <div id="a-panel-requests" class="panel hidden"></div>
+      <div id="a-panel-alerts" class="panel hidden"></div>
+      <div id="a-panel-roster" class="panel hidden">
+        <div id="roster-list"></div>
+        <details class="disclosure">
+          <summary>Add a student to the roster</summary>
+          <form id="form-roster-add" class="form form-wide">
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">Full name</span>
+                <input name="full_name" required maxlength="120" />
+              </label>
+              <label class="field">
+                <span class="field-label">College email</span>
+                <input name="email" type="email" required />
+              </label>
+            </div>
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">Aadhaar number</span>
+                <input name="aadhaar" inputmode="numeric" maxlength="14" autocomplete="off" placeholder="1234 5678 9012" />
+              </label>
+              <label class="field">
+                <span class="field-label">College ID</span>
+                <input name="college_id" autocomplete="off" maxlength="20" placeholder="01FE23BCS000" />
+              </label>
+            </div>
+            <label class="field field-narrow">
+              <span class="field-label">Date of birth</span>
+              <input name="date_of_birth" type="date" required />
+            </label>
+            <p class="field-hint">Give at least one ID number. Only a keyed hash and the last four digits are stored.</p>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">Add to roster</button>
+            </div>
+          </form>
+        </details>
+      </div>
       <div id="a-panel-create" class="panel hidden">
         <form id="form-create-election" class="form form-wide">
           <label class="field">
@@ -215,7 +293,31 @@
         </form>
       </div>
     </section>
+
+    <!-- Security lab -->
+    <section id="view-lab" class="view hidden">
+      <div class="page-head">
+        <h1>Security lab</h1>
+        <p class="lede">Each card runs one attack from our threat model against this server. The defence named on the card stops it, and the administrator is alerted on the Security alerts tab.</p>
+      </div>
+      <div class="lab-bar">
+        <label class="field" id="lab-target-field">
+          <span class="field-label">Target election for attacks 1–3</span>
+          <select id="lab-target"></select>
+        </label>
+        <button type="button" class="btn btn-primary" id="lab-run-all">Run all attacks</button>
+      </div>
+      <p class="field-hint lab-bar-hint" id="lab-target-hint"></p>
+      <ol id="lab-list" class="lab-list"></ol>
+    </section>
   </main>
+
+  <div id="alert-pop" class="alert-pop hidden" role="alert">
+    <p class="alert-pop-kicker">Security alert</p>
+    <p class="alert-pop-title" id="alert-pop-title"></p>
+    <p class="alert-pop-detail" id="alert-pop-detail"></p>
+    <button type="button" class="btn-link" id="alert-pop-review">Review alerts</button>
+  </div>
 
   <footer class="wrap site-footer">
     <p>Ballots are encrypted and signed in your browser before they are sent. Votes are decrypted only when an election is tallied.</p>
@@ -249,6 +351,6 @@
   </template>
 
   <script src="/static/js/vendor/forge.min.js"></script>
-  <script defer src="/static/js/app.js?v=ui-12"></script>
+  <script defer src="/static/js/app.js?v=ui-13"></script>
 </body>
 </html>

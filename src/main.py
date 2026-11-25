@@ -14,6 +14,8 @@ from fastapi.templating import Jinja2Templates
 from src.api_routes import router as api_router
 from src.bootstrap import ensure_bootstrap
 from src.config import settings
+from src.database import get_connection
+from src.security_routes import router as security_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("voting")
@@ -31,17 +33,18 @@ async def lifespan(app: FastAPI):
         settings.election_starts_at,
         settings.election_ends_at,
     )
-    if settings.jwt_secret == "change-me-in-production-use-long-random-secret":
-        logger.warning("JWT_SECRET is the built-in default; anyone can forge sessions. Set it in .env.")
+    if not settings.jwt_secret_is_configured():
+        logger.info("JWT_SECRET not set: using a random secret kept in %s", settings.secrets_dir())
     if settings.admin_password == "admin-change-me":
         logger.warning("ADMIN_PASSWORD is the built-in default. Set it in .env.")
     if settings.expose_otp_in_response and (settings.otp_delivery_mode or "demo").strip().lower() != "smtp":
         logger.warning("Demo OTP mode: login codes are returned in API responses. Do not deploy like this.")
     if not settings.key_encryption_secret:
-        logger.warning("KEY_ENCRYPTION_SECRET is not set; election keys are wrapped with a key derived from JWT_SECRET.")
-    roster = sorted(settings.allowed_student_emails())
+        logger.info("KEY_ENCRYPTION_SECRET not set: election keys are wrapped with a random secret in %s", settings.secrets_dir())
+    with get_connection(settings.db_file()) as conn:
+        roster = [r["email"] for r in conn.execute("SELECT email FROM voter_roster ORDER BY email").fetchall()]
     logger.info(
-        "Application started; database at %s; authorized student roster (%s): %s",
+        "Application started; database at %s; voter roster (%s): %s",
         settings.db_file(),
         len(roster),
         ", ".join(roster) if roster else "(empty — no students can register)",
@@ -97,6 +100,7 @@ def transport_info(request: Request):
 
 
 app.include_router(api_router, prefix="/api")
+app.include_router(security_router, prefix="/api")
 
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 _upload_root = settings.data_dir / "uploads"

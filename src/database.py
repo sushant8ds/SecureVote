@@ -85,6 +85,43 @@ CREATE TABLE IF NOT EXISTS voter_login_otps (
   attempts INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS voter_roster (
+  email TEXT PRIMARY KEY,
+  full_name TEXT NOT NULL,
+  date_of_birth TEXT NOT NULL,
+  aadhaar_hmac TEXT UNIQUE,
+  aadhaar_last4 TEXT,
+  college_id_hmac TEXT UNIQUE,
+  college_id_last4 TEXT,
+  source TEXT NOT NULL DEFAULT 'import',
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS identity_checks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  id_type TEXT NOT NULL,
+  ok INTEGER NOT NULL,
+  reason TEXT,
+  source_ip TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS security_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('high','medium','low')),
+  title TEXT NOT NULL,
+  detail TEXT,
+  actor TEXT,
+  source_ip TEXT,
+  detected_by TEXT NOT NULL,
+  count INTEGER NOT NULL DEFAULT 1,
+  acknowledged INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_type TEXT NOT NULL,
@@ -112,6 +149,17 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_legacy_v1(conn)
     _migrate_election_votes_voter_pubkey(conn)
     _migrate_otp_attempts(conn)
+    _migrate_voter_identity(conn)
+
+
+def _migrate_voter_identity(conn: sqlite3.Connection) -> None:
+    """Accounts created before identity checks have no verification record; they must verify once."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(voters)").fetchall()}
+    if "identity_method" not in cols:
+        conn.execute("ALTER TABLE voters ADD COLUMN identity_method TEXT")
+    if "identity_verified_at" not in cols:
+        conn.execute("ALTER TABLE voters ADD COLUMN identity_verified_at TEXT")
+    conn.commit()
 
 
 def _migrate_otp_attempts(conn: sqlite3.Connection) -> None:

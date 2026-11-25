@@ -7,6 +7,53 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from src.crypto_service import encrypt_vote_plaintext, sign_submission
+from src.identity import verhoeff_check_digit
+
+# Every email the API tests use; each gets a roster entry with the identity from identity_for().
+TEST_EMAILS = [
+    "v1@umsystem.edu",
+    "dup@umsystem.edu",
+    "twice@umsystem.edu",
+    "sig@umsystem.edu",
+    "t1@umsystem.edu",
+    "rekey1@umsystem.edu",
+    "rekey2@umsystem.edu",
+    "rekey3@umsystem.edu",
+    "deleting@umsystem.edu",
+    "idcheck@umsystem.edu",
+]
+
+
+def aadhaar_for(email: str) -> str:
+    """A deterministic, checksum-valid (made-up) Aadhaar number per test email."""
+    import hashlib
+
+    body = "9" + str(int(hashlib.sha256(email.encode()).hexdigest(), 16))[:10]
+    return body + verhoeff_check_digit(body)
+
+
+def identity_for(email: str, id_type: str = "aadhaar") -> dict:
+    """The details on this test student's ID card, matching their roster entry."""
+    return {
+        "id_type": id_type,
+        "id_number": aadhaar_for(email) if id_type == "aadhaar" else college_id_for(email),
+        "full_name": f"Test {email.split('@')[0].capitalize()}",
+        "date_of_birth": "2004-06-15",
+    }
+
+
+def college_id_for(email: str) -> str:
+    import hashlib
+
+    return "01FE23TST" + str(int(hashlib.sha256(email.encode()).hexdigest(), 16))[:3]
+
+
+def roster_csv(emails: list[str]) -> str:
+    lines = ["email,full_name,date_of_birth,aadhaar,college_id"]
+    for e in emails:
+        i = identity_for(e)
+        lines.append(f"{e},{i['full_name']},{i['date_of_birth']},{aadhaar_for(e)},{college_id_for(e)}")
+    return "\n".join(lines) + "\n"
 
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="

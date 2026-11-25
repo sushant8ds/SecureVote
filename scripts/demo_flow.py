@@ -12,7 +12,7 @@ The script talks HTTPS and verifies the server against the local CA in data/tls/
 Then:
   .venv/bin/python scripts/demo_flow.py [--voter you@umsystem.edu] [--password ...]
 
-The voter email must be on STUDENT_EMAIL_ALLOWLIST. Admin credentials come from
+The voter email must be on the voter roster (config/voter_roster.csv). Admin credentials come from
 ADMIN_USERNAME / ADMIN_PASSWORD in the environment, else you are prompted.
 """
 
@@ -86,14 +86,27 @@ def main() -> int:
         priv_pem, pub_pem = generate_rsa_keypair()
         pub_text = pub_pem.decode("utf-8")
 
+        # Demo shortcut: take the ID card details from the roster file (a real voter types them from their card).
+        import csv
+
+        with open(ROOT / "config" / "voter_roster.csv", encoding="utf-8") as fh:
+            rec = next((row for row in csv.DictReader(fh) if row["email"].lower() == args.voter.lower()), None)
+        if rec is None:
+            raise SystemExit(f"{args.voter} is not in config/voter_roster.csv")
+        identity = {
+            "id_type": "aadhaar",
+            "id_number": rec["aadhaar"],
+            "full_name": rec["full_name"],
+            "date_of_birth": rec["date_of_birth"],
+        }
         r = client.post(
             "/api/register",
-            json={"voter_id": args.voter, "password": args.password, "public_key_pem": pub_text},
+            json={"voter_id": args.voter, "password": args.password, "public_key_pem": pub_text, **identity},
         )
         already = r.status_code == 409
         if not already:
             check(r, "Register")
-            print(f"1. Registered {args.voter} (bcrypt password hash + voter public key stored).")
+            print(f"1. Registered {args.voter}: Aadhaar details matched the roster; bcrypt hash + public key stored.")
         else:
             print(f"1. {args.voter} already registered; signing in with --password.")
 

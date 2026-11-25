@@ -3,6 +3,8 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.secrets_store import DEFAULT_JWT_SECRET, load_or_create
+
 # Resolve .env from the repo root so admin credentials load even if uvicorn's cwd is elsewhere.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -20,7 +22,8 @@ class Settings(BaseSettings):
     )
     database_path: Path | None = Field(default=None, validation_alias="DATABASE_PATH")
 
-    jwt_secret: str = "change-me-in-production-use-long-random-secret"
+    # Empty or the old built-in default -> a random secret is generated in <DATA_DIR>/secrets/.
+    jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
 
@@ -31,10 +34,15 @@ class Settings(BaseSettings):
 
     election_starts_at: str | None = None
     election_ends_at: str | None = None
-    student_email_allowlist: str = Field(
-        default="spc7p@umsystem.edu,sgwwp@umsystem.edu,ts8md@umsystem.edu,bayd6@umsystem.edu",
-        validation_alias="STUDENT_EMAIL_ALLOWLIST",
+    # The college's voter roster (email, name, date of birth, Aadhaar and/or college ID). Imported into
+    # the voter_roster table when the file changes; only roster emails can register, and registration
+    # must match the identity details on record. See docs/identity_verification.md.
+    voter_roster_file: Path = Field(
+        default=_PROJECT_ROOT / "config" / "voter_roster.csv",
+        validation_alias="VOTER_ROSTER_FILE",
     )
+    # HMAC key for ID numbers in the roster. Empty -> generated in <DATA_DIR>/secrets/.
+    identity_pepper: str = Field(default="", validation_alias="IDENTITY_PEPPER")
     otp_expire_seconds: int = Field(default=300, validation_alias="OTP_EXPIRE_SECONDS")
     # demo -> return/log OTP (no email). smtp -> send real email via SMTP.
     otp_delivery_mode: str = Field(default="demo", validation_alias="OTP_DELIVERY_MODE")
@@ -59,11 +67,25 @@ class Settings(BaseSettings):
     tls_hosts: str = Field(default="", validation_alias="TLS_HOSTS")
 
     # Secret used to derive the AES-256-GCM key that encrypts election private keys in the database.
-    # Empty -> falls back to JWT_SECRET. Changing it makes existing elections impossible to tally.
+    # Empty -> generated in <DATA_DIR>/secrets/. Changing it makes existing elections impossible to tally.
     key_encryption_secret: str = Field(default="", validation_alias="KEY_ENCRYPTION_SECRET")
 
+    def secrets_dir(self) -> Path:
+        return self.data_dir / "secrets"
+
+    def jwt_secret_is_configured(self) -> bool:
+        return bool(self.jwt_secret) and self.jwt_secret != DEFAULT_JWT_SECRET
+
+    def jwt_signing_secret(self) -> str:
+        if self.jwt_secret_is_configured():
+            return self.jwt_secret
+        return load_or_create(self.secrets_dir(), "jwt_secret")
+
     def key_wrap_secret(self) -> str:
-        return self.key_encryption_secret or self.jwt_secret
+        return self.key_encryption_secret or load_or_create(self.secrets_dir(), "key_encryption_secret")
+
+    def identity_secret(self) -> str:
+        return self.identity_pepper or load_or_create(self.secrets_dir(), "identity_pepper")
 
     def tls_dir(self) -> Path:
         return self.data_dir / "tls"
@@ -77,15 +99,6 @@ class Settings(BaseSettings):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         return self.data_dir / "voting.db"
 
-    def allowed_student_emails(self) -> set[str]:
-        raw = (self.student_email_allowlist or "").strip()
-        if raw.startswith("\ufeff"):
-            raw = raw[1:]
-        return {
-            e.strip().lower()
-            for e in raw.split(",")
-            if e.strip()
-        }
 
 
 settings = Settings()

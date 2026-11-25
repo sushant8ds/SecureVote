@@ -17,6 +17,8 @@ The root path `/` must serve the app. This project now serves **`GET /`** as the
 | Ballot origin | RSA-PSS + SHA-256 over UTF-8 `encrypted_vote ‖ \| ‖ timestamp` |
 | Data in transit | TLS 1.2+ (HTTPS) with a locally generated CA and server certificate; HTTP redirects to HTTPS |
 | Election private keys at rest | AES-256-GCM, key derived with PBKDF2-HMAC-SHA256 |
+| Voter identity | Aadhaar or college ID details compared with the college roster; ID numbers kept only as HMAC-SHA256 |
+| Server secrets | Generated at first start in `data/secrets/` (mode 0600), never in the database or the repo |
 
 Voter **signing** key pairs are generated in the browser (WebCrypto); only the public key is sent to the server, and the private key is stored in **browser `localStorage`** for the demo UI. Each election has its own RSA key pair in the database.
 
@@ -26,6 +28,12 @@ Other enforced rules:
 - Ballots are decrypted **only at tally**, never at submission.
 - A login OTP is invalidated after 5 wrong guesses.
 - A voter who has cast a ballot cannot be deleted (it would remove the ballot).
+- Registration needs the details from an Aadhaar card or college ID card that match the roster entry for that email; 3 failed checks pause checks for 15 minutes (`docs/identity_verification.md`).
+- Every attack the server stops (forged signature, replay, second vote, code guessing, identity mismatch, credentials on plain HTTP) raises a **security alert** that appears live on the admin screen.
+
+## Security lab
+
+Signed-in users get a **Security lab** page (`/#lab`) that runs the seven attacks from the threat model against the live server: forged signature, replayed ballot, second vote, login-code guessing (from the browser, as real API calls), and Wi-Fi sniffing, TLS downgrade / impostor server, and stolen-database analysis (server-side probes, `src/attack_lab.py`). Each card shows the attacker's steps and the server's answer. Open `/#admin` in another window to watch the alerts arrive. See `docs/attack_simulation.md`.
 
 Known limit of this prototype: each stored ballot is linked to its voter ID and the server holds the secret that unlocks the election key, so the server operator can learn how a voter voted.
 
@@ -74,14 +82,15 @@ For development without TLS: `uvicorn src.main:app --reload --host 127.0.0.1 --p
 
 | Variable | Purpose |
 |----------|---------|
-| `JWT_SECRET` | HMAC key for JWTs |
-| `KEY_ENCRYPTION_SECRET` | Derives the AES-256-GCM key protecting election private keys in the database (falls back to `JWT_SECRET`) |
+| `JWT_SECRET` | HMAC key for JWTs (unset: random, kept in `data/secrets/`) |
+| `KEY_ENCRYPTION_SECRET` | Derives the AES-256-GCM key protecting election private keys (unset: random, kept in `data/secrets/`) |
+| `IDENTITY_PEPPER` | HMAC key for roster ID numbers (unset: random, kept in `data/secrets/`) |
+| `VOTER_ROSTER_FILE` | Roster CSV `email,full_name,date_of_birth,aadhaar,college_id` (default `config/voter_roster.csv`, demo data) |
 | `HOST`, `HTTPS_PORT`, `HTTP_REDIRECT_PORT` | Listener settings for `run.py` (defaults `127.0.0.1`, `8443`, `8000`; redirect port `0` = off) |
 | `TLS_HOSTS` | Extra names / IPs for the generated certificate |
 | `TLS_CERT_FILE`, `TLS_KEY_FILE` | Use a real certificate instead of the generated one |
 | `ADMIN_PASSWORD` | Used to seed the first admin account if the `admins` table is empty (bcrypt in DB) |
 | `ADMIN_USERNAME` | Username for that seeded account (default `admin`) |
-| `STUDENT_EMAIL_ALLOWLIST` | Comma-separated authorized student emails (e.g. `ts8md@umsystem.edu,spc7p@umsystem.edu`) |
 | `OTP_EXPIRE_SECONDS` | OTP lifetime in seconds (default `300`) |
 | `OTP_DELIVERY_MODE` | `demo` (logs/returns OTP) or `smtp` (sends real OTP email) |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, `SMTP_USE_STARTTLS` | SMTP settings used when `OTP_DELIVERY_MODE=smtp` |
@@ -93,7 +102,7 @@ For development without TLS: `uvicorn src.main:app --reload --host 127.0.0.1 --p
 
 All under prefix **`/api`**:
 
-- `POST /api/register` (optional `public_key_pem`), `POST /api/login` (password, then password + `otp`), `POST /api/voter/restore-signing-key`, `GET /api/admin/setup-status`, `POST /api/admin/register-first` (only if no admins), `POST /api/admin/login` (username + password), `GET /api/admin/dashboard-summary`
+- `POST /api/register` (identity: `id_type` aadhaar|college_id, `id_number`, `full_name`, `date_of_birth`; optional `public_key_pem`), `POST /api/voter/verify-identity`, `GET /api/voter/session`, `POST /api/login` (password, then password + `otp`), `POST /api/voter/restore-signing-key`, `GET /api/admin/setup-status`, `POST /api/admin/register-first` (only if no admins), `POST /api/admin/login` (username + password), `GET /api/admin/dashboard-summary`
 - `GET /api/elections` (optional `Authorization: Bearer` voter token for per-user status)
 - `GET /api/elections/{id}/detail`
 - `POST /api/elections/{id}/register` (voter)
@@ -103,6 +112,8 @@ All under prefix **`/api`**:
 - `POST /api/elections/{id}/vote` — body: `voter_id`, `encrypted_vote` (base64), `signature`, `timestamp`; plaintext JSON is `{"contestant_id": <int>}`
 - `POST /api/admin/elections/{id}/close`, `POST /api/admin/elections/{id}/publish-results`
 - `GET /api/elections/{id}/results` (after publish)
+- Admin: `GET /api/admin/alerts`, `GET /api/admin/alerts/summary`, `POST /api/admin/alerts/{id}/ack`, `POST /api/admin/alerts/ack-all`; `GET|POST /api/admin/roster`, `DELETE /api/admin/roster/{email}`
+- Security lab (any signed-in user): `POST /api/lab/sniff`, `POST /api/lab/tls`, `POST /api/lab/db-theft`
 
 Legacy shims for the original single-election flow: `/api/legacy/...`.
 
@@ -136,7 +147,7 @@ EXPOSE_OTP_IN_RESPONSE=false
 ```
 
 2. Restart the server.
-3. Login sends OTP to the student email in `STUDENT_EMAIL_ALLOWLIST`.
+3. Login sends the OTP to the student's roster email.
 
 ## License
 

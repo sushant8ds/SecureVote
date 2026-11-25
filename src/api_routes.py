@@ -21,9 +21,10 @@ def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 import sqlite3
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field
 
+from src.alerts import record_alert
 from src.auth_tokens import create_access_token, safe_decode
 from src.config import settings
 from src.crypto_service import (
@@ -40,6 +41,21 @@ from src.crypto_service import (
     wrap_private_key,
 )
 from src.database import audit_log, get_connection, get_election_row
+from src.identity import (
+    ID_LABELS,
+    IDENTITY_LOCK_MINUTES,
+    MAX_IDENTITY_FAILURES,
+    IdentityFormatError,
+    is_on_roster,
+    masked,
+    mismatched_fields,
+    normalize_dob,
+    normalize_email,
+    normalize_id_number,
+    recent_failures,
+    record_check,
+    roster_row,
+)
 
 logger = logging.getLogger("voting")
 
@@ -55,12 +71,21 @@ VOTE_TIMESTAMP_SKEW_SECONDS = 300
 
 
 class RegisterPrecheckBody(BaseModel):
-    """Email-only check: same allowlist as register, but does not create an account or require a password."""
+    """Email-only check: same roster check as register, but does not create an account or require a password."""
 
     voter_id: str = Field(min_length=1, max_length=128)
 
 
-class RegisterBody(BaseModel):
+class IdentityBody(BaseModel):
+    """Details from the voter's ID card, compared with the college roster entry for their email."""
+
+    id_type: str = Field(pattern="^(aadhaar|college_id)$")
+    id_number: str = Field(min_length=1, max_length=32)
+    full_name: str = Field(min_length=1, max_length=120)
+    date_of_birth: str = Field(min_length=8, max_length=10)
+
+
+class RegisterBody(IdentityBody):
     voter_id: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=8)
     # Preferred: the client generates its signing key pair and sends only the public half.
@@ -118,27 +143,95 @@ def _normalize_voter_email(voter_id: str) -> str:
     return voter_id.strip().lower()
 
 
-# Shown on register/login when email is not in STUDENT_EMAIL_ALLOWLIST, and when JWT sub is not allowlisted.
-ALLOWLIST_REJECTION_DETAIL = (
-    "This email is not in the college authorized database for SecureVote. Only the approved addresses on the server list may register."
+def client_ip(request: Request | None) -> str | None:
+    return request.client.host if request is not None and request.client else None
+
+
+# Shown on register/login when the email is not on the roster, and when a JWT subject is no longer on it.
+NOT_ON_ROSTER_DETAIL = (
+    "This email is not on the college voter roster. Only students on the roster can register and vote."
 )
 
 
-def _validate_allowed_student_email(voter_id: str) -> str:
-    email = _normalize_voter_email(voter_id)
-    if not re.match(r"^[a-z0-9._%+-]+@umsystem\.edu$", email):
-        raise HTTPException(status_code=400, detail="Use your college email ending with @umsystem.edu")
-    if email not in settings.allowed_student_emails():
-        raise HTTPException(status_code=403, detail=ALLOWLIST_REJECTION_DETAIL)
+def _validate_roster_email(voter_id: str) -> str:
+    try:
+        email = normalize_email(voter_id)
+    except IdentityFormatError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with get_connection(_db_path) as conn:
+        if not is_on_roster(conn, email):
+            raise HTTPException(status_code=403, detail=NOT_ON_ROSTER_DETAIL)
     return email
 
 
-def _assert_jwt_voter_sub_allowlisted(raw_sub: str) -> str:
-    """Re-check allowlist on every voter-authenticated request (JWT sub must match configured list)."""
+def _assert_jwt_voter_sub_on_roster(raw_sub: str) -> str:
+    """Re-check the roster on every voter-authenticated request (a removed student loses access at once)."""
     email = _normalize_voter_email(raw_sub)
-    if email not in settings.allowed_student_emails():
-        raise HTTPException(status_code=403, detail=ALLOWLIST_REJECTION_DETAIL)
+    with get_connection(_db_path) as conn:
+        if not is_on_roster(conn, email):
+            raise HTTPException(status_code=403, detail=NOT_ON_ROSTER_DETAIL)
     return email
+
+
+_FIELD_LABELS = {"id_number": "ID number", "name": "name", "date_of_birth": "date of birth"}
+
+
+def _verify_identity(conn: sqlite3.Connection, email: str, body: IdentityBody, ip: str | None) -> None:
+    """Compare ID-card details with the roster entry for ``email``; raise unless they all match.
+
+    The error does not say which field was wrong, so the check cannot be used to confirm a guessed
+    date of birth or ID number one field at a time. The administrator's alert does say.
+    """
+    try:
+        number = normalize_id_number(body.id_type, body.id_number)
+        dob = normalize_dob(body.date_of_birth)
+    except IdentityFormatError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    failures = recent_failures(conn, email)
+    if failures >= MAX_IDENTITY_FAILURES:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Identity checks for this email are paused for {IDENTITY_LOCK_MINUTES} minutes after {MAX_IDENTITY_FAILURES} failed attempts.",
+        )
+    row = roster_row(conn, email)
+    if row is None:
+        raise HTTPException(status_code=403, detail=NOT_ON_ROSTER_DETAIL)
+    bad = mismatched_fields(
+        row, settings.identity_secret(), id_type=body.id_type, id_number=number, full_name=body.full_name, date_of_birth=dob
+    )
+    card = ID_LABELS[body.id_type]
+    if not bad:
+        record_check(conn, email, body.id_type, True, None, ip)
+        return
+    record_check(conn, email, body.id_type, False, ",".join(bad), ip)
+    left = MAX_IDENTITY_FAILURES - (failures + 1)
+    wrong = ", ".join(_FIELD_LABELS[b] for b in bad)
+    if left <= 0:
+        record_alert(
+            conn,
+            "identity_lockout",
+            detail=f"{MAX_IDENTITY_FAILURES} failed {card} checks for {email} within {IDENTITY_LOCK_MINUTES} minutes "
+            f"(last mismatch: {wrong}). Identity checks for this email are paused.",
+            detected_by="Identity check",
+            actor=email,
+            source_ip=ip,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=f"These details don't match the college record. Identity checks for this email are paused for {IDENTITY_LOCK_MINUTES} minutes.",
+        )
+    record_alert(
+        conn,
+        "identity_mismatch",
+        detail=f"{card} details given for {email} did not match the college roster (mismatch: {wrong}).",
+        detected_by="Identity check",
+        actor=email,
+        source_ip=ip,
+    )
+    raise HTTPException(
+        status_code=403,
+        detail=f"These details don't match the college record for this email. {left} attempt{'s' if left != 1 else ''} left.",
+    )
 
 
 def _otp_hash(v: str) -> str:
@@ -188,7 +281,7 @@ def require_voter(token: str = Depends(bearer_token)) -> str:
     payload = safe_decode(token)
     if not payload or payload.get("role") != "voter" or not payload.get("sub"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session")
-    return _assert_jwt_voter_sub_allowlisted(str(payload["sub"]))
+    return _assert_jwt_voter_sub_on_roster(str(payload["sub"]))
 
 
 def admin_bearer(token: str = Depends(bearer_token)) -> None:
@@ -207,14 +300,43 @@ def optional_voter(authorization: str | None = Header(default=None)) -> str | No
     if p is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session")
     if p.get("role") == "voter" and p.get("sub"):
-        return _assert_jwt_voter_sub_allowlisted(str(p["sub"]))
+        return _assert_jwt_voter_sub_on_roster(str(p["sub"]))
     return None
 
 
 @router.get("/voter/session")
 def voter_session(voter_sub: str = Depends(require_voter)):
     """Lightweight check used on app load so the UI does not trust localStorage alone."""
-    return {"voter_id": voter_sub}
+    with get_connection(_db_path) as conn:
+        v = conn.execute(
+            "SELECT identity_method, identity_verified_at FROM voters WHERE voter_id = ?", (voter_sub,)
+        ).fetchone()
+        r = roster_row(conn, voter_sub)
+    return {
+        "voter_id": voter_sub,
+        "full_name": r["full_name"] if r else None,
+        "identity_verified": bool(v and v["identity_verified_at"]),
+        "identity_method": v["identity_method"] if v else None,
+    }
+
+
+@router.post("/voter/verify-identity")
+def verify_identity(body: IdentityBody, request: Request, voter_sub: str = Depends(require_voter)):
+    """For accounts created before identity checks existed: verify once against the roster."""
+    with get_connection(_db_path) as conn:
+        v = conn.execute("SELECT identity_verified_at FROM voters WHERE voter_id = ?", (voter_sub,)).fetchone()
+        if not v:
+            raise HTTPException(status_code=404, detail="Voter not found")
+        if v["identity_verified_at"]:
+            return {"ok": True, "identity_method": body.id_type, "already_verified": True}
+        _verify_identity(conn, voter_sub, body, client_ip(request))
+        conn.execute(
+            "UPDATE voters SET identity_method = ?, identity_verified_at = ? WHERE voter_id = ?",
+            (body.id_type, _utc_iso(), voter_sub),
+        )
+        conn.commit()
+        audit_log(conn, "voter_identity_verified", f"{voter_sub} via {body.id_type}")
+    return {"ok": True, "identity_method": body.id_type}
 
 
 # --- Models via dict / inline ---
@@ -222,32 +344,37 @@ def voter_session(voter_sub: str = Depends(require_voter)):
 
 @router.post("/register/precheck")
 def api_register_precheck(body: RegisterPrecheckBody):
-    """Fail fast on the sign-up page: reject emails that are not in ``STUDENT_EMAIL_ALLOWLIST`` before any account exists."""
-    voter_id = _validate_allowed_student_email(body.voter_id)
+    """Fail fast on the sign-up page: reject emails that are not on the voter roster before any account exists."""
+    voter_id = _validate_roster_email(body.voter_id)
     return {"ok": True, "voter_id": voter_id}
 
 
+_ALREADY_REGISTERED = (
+    "This email is already registered. Use Sign in (not Register) with the same address and password — a one-time code will be sent next."
+)
+
+
 @router.post("/register", status_code=201)
-def api_register(body: RegisterBody):
-    voter_id = _validate_allowed_student_email(body.voter_id)
+def api_register(body: RegisterBody, request: Request):
+    voter_id = _validate_roster_email(body.voter_id)
     password = body.password
-    if not voter_id:
-        raise HTTPException(status_code=400, detail="Invalid input format")
     priv_pem, pub_pem = _voter_keypair_for_request(body.public_key_pem)
-    ph = hash_password(password)
     with get_connection(_db_path) as conn:
+        if conn.execute("SELECT 1 FROM voters WHERE voter_id = ?", (voter_id,)).fetchone():
+            raise HTTPException(status_code=409, detail=_ALREADY_REGISTERED)
+        # Identity first: no account (and no bcrypt work) for someone who cannot show the right ID.
+        _verify_identity(conn, voter_id, body, client_ip(request))
+        ph = hash_password(password)
         try:
             conn.execute(
-                "INSERT INTO voters (voter_id, password_hash, public_key_pem, has_voted) VALUES (?, ?, ?, 0)",
-                (voter_id, ph, pub_pem),
+                """INSERT INTO voters (voter_id, password_hash, public_key_pem, has_voted, identity_method, identity_verified_at)
+                   VALUES (?, ?, ?, 0, ?, ?)""",
+                (voter_id, ph, pub_pem, body.id_type, _utc_iso()),
             )
             conn.commit()
         except sqlite3.IntegrityError:
-            raise HTTPException(
-                status_code=409,
-                detail="This email is already registered. Use Sign in (not Register) with the same address and password — a one-time code will be sent next.",
-            )
-        audit_log(conn, "voter_registered", voter_id)
+            raise HTTPException(status_code=409, detail=_ALREADY_REGISTERED)
+        audit_log(conn, "voter_registered", f"{voter_id} (identity verified via {body.id_type})")
     return {
         "voter_id": voter_id,
         "voter_private_key_pem": priv_pem,
@@ -260,8 +387,8 @@ def api_register(body: RegisterBody):
 
 
 @router.post("/login")
-def api_login(body: LoginBody):
-    voter_id = _validate_allowed_student_email(body.voter_id)
+def api_login(body: LoginBody, request: Request):
+    voter_id = _validate_roster_email(body.voter_id)
     password = body.password
     otp = (body.otp or "").strip()
     with get_connection(_db_path) as conn:
@@ -325,6 +452,15 @@ def api_login(body: LoginBody):
             conn.commit()
             if burned:
                 audit_log(conn, "voter_login_otp_locked", voter_id)
+                record_alert(
+                    conn,
+                    "otp_bruteforce",
+                    detail=f"{MAX_OTP_ATTEMPTS} wrong login codes for {voter_id} after a correct password. "
+                    "The code was burned; whoever is guessing knows this voter's password.",
+                    detected_by="Sign-in",
+                    actor=voter_id,
+                    source_ip=client_ip(request),
+                )
                 raise HTTPException(status_code=401, detail="Too many wrong codes. Request a new OTP.")
             raise HTTPException(status_code=401, detail="Invalid OTP")
         conn.execute("UPDATE voter_login_otps SET consumed = 1 WHERE id = ?", (rec["id"],))
@@ -545,6 +681,9 @@ def election_detail(election_id: int, voter_id: Annotated[str | None, Depends(op
 @router.post("/elections/{election_id}/register")
 def register_for_election(election_id: int, voter_sub: str = Depends(require_voter)):
     with get_connection(_db_path) as conn:
+        v = conn.execute("SELECT identity_verified_at FROM voters WHERE voter_id = ?", (voter_sub,)).fetchone()
+        if not v or not v["identity_verified_at"]:
+            raise HTTPException(status_code=403, detail="Verify your identity before requesting access to an election.")
         el = get_election_row(conn, election_id)
         if not el:
             raise HTTPException(status_code=404, detail="Election not found")
@@ -571,15 +710,27 @@ def admin_list_registrations(
     if status_filter not in ("pending", "approved", "rejected", "all"):
         status_filter = "pending"
     with get_connection(_db_path) as conn:
-        q = """SELECT r.id, r.election_id, r.voter_id, r.status, r.created_at, e.title AS election_title
-               FROM election_registrations r JOIN elections e ON e.id = r.election_id"""
+        q = """SELECT r.id, r.election_id, r.voter_id, r.status, r.created_at, e.title AS election_title,
+                      v.identity_method, v.identity_verified_at, ro.full_name,
+                      ro.aadhaar_last4, ro.college_id_last4
+               FROM election_registrations r JOIN elections e ON e.id = r.election_id
+               LEFT JOIN voters v ON v.voter_id = r.voter_id
+               LEFT JOIN voter_roster ro ON ro.email = r.voter_id"""
         args: list = []
         if status_filter != "all":
             q += " WHERE r.status = ?"
             args.append(status_filter)
         q += " ORDER BY r.id DESC"
         rows = conn.execute(q, args).fetchall()
-        return {"registrations": [dict(r) for r in rows]}
+        out = []
+        for r in rows:
+            d = dict(r)
+            a4, c4 = d.pop("aadhaar_last4"), d.pop("college_id_last4")
+            method = d["identity_method"]
+            d["identity_label"] = ID_LABELS.get(method or "")
+            d["identity_masked"] = masked(a4 if method == "aadhaar" else c4 if method == "college_id" else None)
+            out.append(d)
+        return {"registrations": out}
 
 
 @router.post("/admin/registrations/{reg_id}/approve")
@@ -687,33 +838,41 @@ async def admin_create_election(
 
 
 @router.post("/elections/{election_id}/vote")
-def api_vote(election_id: int, body: VoteBody, voter_sub: str = Depends(require_voter)):
+def api_vote(election_id: int, body: VoteBody, request: Request, voter_sub: str = Depends(require_voter)):
+    """Accept one encrypted, signed ballot. The checks run in this order:
+
+    session matches ballot -> election open -> voter approved and identity-verified -> RSA-PSS signature
+    -> timestamp (server clock inside the window, signed time within 5 minutes) -> one ballot per voter
+    -> ciphertext format. The signature is checked before the duplicate check, so a forged ballot is
+    reported as forged even from someone who has already voted. Attacks raise an admin alert.
+    """
     voter_id = body.voter_id
     encrypted_vote = body.encrypted_vote
     sig = body.signature
     ts = body.timestamp
-    if voter_id != voter_sub:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    try:
-        ts_p = parse_iso8601(ts)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid vote format")
+    ip = client_ip(request)
 
     with get_connection(_db_path) as conn:
+
+        def alert(kind: str, detail: str) -> None:
+            record_alert(conn, kind, detail=detail, detected_by="Ballot intake", actor=voter_sub, source_ip=ip)
+
+        if voter_id != voter_sub:
+            alert(
+                "ballot_for_other_voter",
+                f"{voter_sub} submitted a ballot labelled as {voter_id!r} in election {election_id}.",
+            )
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        try:
+            ts_p = parse_iso8601(ts)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid vote format")
+
         el = get_election_row(conn, election_id)
         if not el:
             raise HTTPException(status_code=404, detail="Election not found")
         if el["closed"]:
             raise HTTPException(status_code=403, detail="Election is closed")
-        w_start = parse_iso8601(el["starts_at"])
-        w_end = parse_iso8601(el["ends_at"])
-        # The window is enforced against the server clock; the signed timestamp is client-controlled,
-        # so it must also be close to "now" (otherwise a ballot could be backdated or replayed later).
-        now = datetime.now(timezone.utc)
-        if not (w_start <= now <= w_end) or not (w_start <= ts_p <= w_end):
-            raise HTTPException(status_code=422, detail="Vote outside election window")
-        if abs((now - ts_p).total_seconds()) > VOTE_TIMESTAMP_SKEW_SECONDS:
-            raise HTTPException(status_code=422, detail="Vote timestamp is too far from server time")
 
         reg = conn.execute(
             "SELECT status FROM election_registrations WHERE election_id = ? AND voter_id = ?",
@@ -725,17 +884,47 @@ def api_vote(election_id: int, body: VoteBody, voter_sub: str = Depends(require_
         voter = conn.execute("SELECT * FROM voters WHERE voter_id = ?", (voter_id,)).fetchone()
         if not voter:
             raise HTTPException(status_code=400, detail="Invalid vote format")
+        if not voter["identity_verified_at"]:
+            raise HTTPException(status_code=403, detail="Verify your identity before voting.")
+
+        pub_pem = voter["public_key_pem"].encode("utf-8")
+        if not verify_submission_signature(encrypted_vote, ts, sig, pub_pem):
+            alert(
+                "forged_signature",
+                f"Ballot for {el['title']!r} carried an RSA-PSS signature that does not verify with "
+                f"{voter_id}'s public key. Rejected before storage.",
+            )
+            raise HTTPException(status_code=409, detail="Invalid signature")
+
+        # The window is enforced against the server clock; the signed timestamp is client-controlled,
+        # so it must also be close to "now" (otherwise a ballot could be backdated or replayed later).
+        w_start = parse_iso8601(el["starts_at"])
+        w_end = parse_iso8601(el["ends_at"])
+        now = datetime.now(timezone.utc)
+        if not (w_start <= now <= w_end):
+            raise HTTPException(status_code=422, detail="Vote outside election window")
+        if not (w_start <= ts_p <= w_end):
+            alert(
+                "replay",
+                f"Validly signed ballot for {el['title']!r} with timestamp {ts}, outside the election window.",
+            )
+            raise HTTPException(status_code=422, detail="Vote outside election window")
+        skew = (now - ts_p).total_seconds()
+        if abs(skew) > VOTE_TIMESTAMP_SKEW_SECONDS:
+            alert(
+                "replay",
+                f"Validly signed ballot for {el['title']!r} with timestamp {ts}, "
+                f"{abs(int(skew)) // 60} min {'old' if skew > 0 else 'in the future'} (limit 5 min).",
+            )
+            raise HTTPException(status_code=422, detail="Vote timestamp is too far from server time")
 
         existing = conn.execute(
             "SELECT 1 FROM election_votes WHERE election_id = ? AND voter_id = ?",
             (election_id, voter_id),
         ).fetchone()
         if existing:
+            alert("double_vote", f"{voter_id} tried to cast a second ballot in {el['title']!r}.")
             raise HTTPException(status_code=403, detail="Voter has already voted")
-
-        pub_pem = voter["public_key_pem"].encode("utf-8")
-        if not verify_submission_signature(encrypted_vote, ts, sig, pub_pem):
-            raise HTTPException(status_code=409, detail="Invalid signature")
 
         # The ballot is NOT decrypted here: the election private key is used only at tally time
         # (docs/key_lifecycle.md). A ballot naming an unknown contestant is reported as a tally failure.
@@ -756,6 +945,7 @@ def api_vote(election_id: int, body: VoteBody, voter_sub: str = Depends(require_
             )
             conn.commit()
         except sqlite3.IntegrityError:
+            alert("double_vote", f"{voter_id} tried to cast a second ballot in {el['title']!r}.")
             raise HTTPException(status_code=403, detail="Voter has already voted")
         audit_log(conn, "vote_cast", f"{voter_id} election {election_id}")
     return {"ok": True}
@@ -901,12 +1091,12 @@ def legacy_election_info():
 
 
 @router.post("/legacy/vote")
-def legacy_vote(body: VoteBody, voter_sub: str = Depends(require_voter)):
+def legacy_vote(body: VoteBody, request: Request, voter_sub: str = Depends(require_voter)):
     with get_connection(_db_path) as conn:
         row = conn.execute("SELECT id FROM elections ORDER BY id ASC LIMIT 1").fetchone()
         if not row:
             raise HTTPException(status_code=500, detail="No elections configured")
-    return api_vote(int(row["id"]), body, voter_sub)
+    return api_vote(int(row["id"]), body, request, voter_sub)
 
 
 @router.post("/legacy/election/close")

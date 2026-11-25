@@ -18,11 +18,11 @@ def create_access_token(subject: str, role: str) -> str:
         "iat": int(now.timestamp()),
         "exp": expire,
     }
-    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    return jwt.encode(payload, settings.jwt_signing_secret(), algorithm=settings.jwt_algorithm)
 
 
 def decode_token(token: str) -> dict:
-    return jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    return jwt.decode(token, settings.jwt_signing_secret(), algorithms=[settings.jwt_algorithm])
 
 
 def safe_decode(token: str) -> dict | None:
