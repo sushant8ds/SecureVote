@@ -11,7 +11,7 @@ import re
 import secrets
 import smtplib
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Annotated
@@ -153,15 +153,53 @@ NOT_ON_ROSTER_DETAIL = (
 )
 
 
-def _validate_roster_email(voter_id: str) -> str:
+def _validate_roster_email(voter_id: str, *, attempt: str | None = None, ip: str | None = None) -> str:
+    """Normalise the email and require it on the roster. ``attempt`` ("register", "sign in") alerts the admin."""
     try:
         email = normalize_email(voter_id)
     except IdentityFormatError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     with get_connection(_db_path) as conn:
         if not is_on_roster(conn, email):
+            if attempt:
+                record_alert(
+                    conn,
+                    "unknown_user",
+                    detail=f"{email} is not on the voter roster and tried to {attempt}. The request was refused.",
+                    detected_by="Sign-in" if attempt == "sign in" else "Registration",
+                    actor=email,
+                    source_ip=ip,
+                )
             raise HTTPException(status_code=403, detail=NOT_ON_ROSTER_DETAIL)
     return email
+
+
+# Wrong passwords for one account within this window raise a "Repeated wrong passwords" alert.
+PASSWORD_ALERT_THRESHOLD = 3
+PASSWORD_ALERT_WINDOW_MINUTES = 15
+
+
+def _record_wrong_password(conn: sqlite3.Connection, voter_id: str, ip: str | None) -> None:
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        "INSERT INTO login_failures (voter_id, source_ip, created_at) VALUES (?, ?, ?)",
+        (voter_id, ip, _utc_iso()),
+    )
+    conn.commit()
+    since = (now - timedelta(minutes=PASSWORD_ALERT_WINDOW_MINUTES)).isoformat().replace("+00:00", "Z")
+    n = conn.execute(
+        "SELECT COUNT(*) AS c FROM login_failures WHERE voter_id = ? AND created_at >= ?", (voter_id, since)
+    ).fetchone()["c"]
+    if n >= PASSWORD_ALERT_THRESHOLD:
+        record_alert(
+            conn,
+            "password_guessing",
+            detail=f"{n} wrong passwords for {voter_id} in the last {PASSWORD_ALERT_WINDOW_MINUTES} minutes. "
+            "Someone may be guessing this voter's password.",
+            detected_by="Sign-in",
+            actor=voter_id,
+            source_ip=ip,
+        )
 
 
 def _assert_jwt_voter_sub_on_roster(raw_sub: str) -> str:
@@ -356,7 +394,7 @@ _ALREADY_REGISTERED = (
 
 @router.post("/register", status_code=201)
 def api_register(body: RegisterBody, request: Request):
-    voter_id = _validate_roster_email(body.voter_id)
+    voter_id = _validate_roster_email(body.voter_id, attempt="register", ip=client_ip(request))
     password = body.password
     priv_pem, pub_pem = _voter_keypair_for_request(body.public_key_pem)
     with get_connection(_db_path) as conn:
@@ -388,7 +426,7 @@ def api_register(body: RegisterBody, request: Request):
 
 @router.post("/login")
 def api_login(body: LoginBody, request: Request):
-    voter_id = _validate_roster_email(body.voter_id)
+    voter_id = _validate_roster_email(body.voter_id, attempt="sign in", ip=client_ip(request))
     password = body.password
     otp = (body.otp or "").strip()
     with get_connection(_db_path) as conn:
@@ -396,6 +434,7 @@ def api_login(body: LoginBody, request: Request):
         if not row:
             raise HTTPException(status_code=404, detail="Voter not found")
         if not verify_password(password, row["password_hash"]):
+            _record_wrong_password(conn, voter_id, client_ip(request))
             raise HTTPException(
                 status_code=401,
                 detail="Incorrect password for this account. The one-time code is only sent after your password is accepted. Use the same password you chose at registration.",

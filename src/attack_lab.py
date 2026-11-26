@@ -38,7 +38,9 @@ from src.crypto_service import decrypt_vote_ciphertext, unwrap_private_key
 from src.secrets_store import DEFAULT_JWT_SECRET
 
 TIMEOUT = 5.0
-# A made-up victim: the email is not on the roster, so the login is refused and no account is touched.
+# A made-up victim. The request goes to /api/lab/echo, which discards it, so no account is touched
+# and no unrelated alert is raised; on the wire it looks exactly like a login.
+LAB_ECHO_PATH = "/api/lab/echo"
 VICTIM_EMAIL = "victim@lab.invalid"
 VICTIM_PASSWORD = "Campus-WiFi-Secret-42"
 
@@ -89,7 +91,7 @@ def tls_records(data: bytes) -> list[str]:
 def _login_request(host_header: str) -> bytes:
     body = json.dumps({"voter_id": VICTIM_EMAIL, "password": VICTIM_PASSWORD}).encode()
     head = (
-        f"POST /api/login HTTP/1.1\r\nHost: {host_header}\r\nContent-Type: application/json\r\n"
+        f"POST {LAB_ECHO_PATH} HTTP/1.1\r\nHost: {host_header}\r\nContent-Type: application/json\r\n"
         f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
     ).encode()
     return head + body
@@ -192,7 +194,7 @@ def run_sniff(target: Target) -> dict:
     steps.append(
         step(
             "A voter signs in on campus Wi-Fi",
-            lines=[f"POST /api/login with password “{VICTIM_PASSWORD}” (a made-up victim account)."],
+            lines=[f"A login request carrying the password “{VICTIM_PASSWORD}” (a made-up victim account)."],
         )
     )
     try:
@@ -217,7 +219,7 @@ def run_sniff(target: Target) -> dict:
             code=hexdump(cap["app_bytes"]),
         )
     )
-    leaked = VICTIM_PASSWORD.encode() in cap["wire"] or b"/api/login" in cap["wire"]
+    leaked = VICTIM_PASSWORD.encode() in cap["wire"] or LAB_ECHO_PATH.encode() in cap["wire"]
     steps.append(
         step(
             "The attacker searches the capture for the password",

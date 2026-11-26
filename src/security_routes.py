@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -175,6 +176,12 @@ def _lab_alert(kind: str, detail: str, actor: str, request: Request, severity: s
         )
 
 
+@router.post("/lab/echo")
+async def lab_echo(request: Request):
+    """Target of the sniffing probe: reads and discards the body. Holds no data and changes nothing."""
+    return {"received_bytes": len(await request.body())}
+
+
 @router.post("/lab/sniff")
 def lab_sniff(request: Request, actor: str = Depends(require_signed_in)):
     # The plain-HTTP step reaches the real port-8000 listener, which raises its own alert.
@@ -215,3 +222,75 @@ def lab_db_theft(request: Request, actor: str = Depends(require_signed_in)):
         "high" if res["outcome"] == "exposed" else None,
     )
     return res
+
+
+# ---------- What is stored in the database (admin, read-only) ----------
+
+_STORED_VIEWS = [
+    {
+        "table": "election_votes",
+        "title": "Ballots",
+        "protection": "RSA-OAEP ciphertext, RSA-PSS signature, SHA-256 integrity hash",
+        "sql": "SELECT election_id, voter_id, encrypted_vote, signature, integrity_hash FROM election_votes ORDER BY id DESC LIMIT 5",
+        "secret": {"encrypted_vote", "signature", "integrity_hash"},
+    },
+    {
+        "table": "elections",
+        "title": "Election private keys",
+        "protection": "AES-256-GCM, key derived with PBKDF2 (200,000 rounds) from a secret outside the database",
+        "sql": "SELECT id, title, private_key_pem FROM elections ORDER BY id DESC LIMIT 5",
+        "secret": {"private_key_pem"},
+    },
+    {
+        "table": "voters",
+        "title": "Voter passwords",
+        "protection": "bcrypt, cost 12 (salted, one-way)",
+        "sql": "SELECT voter_id, password_hash, identity_method FROM voters ORDER BY voter_id LIMIT 5",
+        "secret": {"password_hash"},
+    },
+    {
+        "table": "voter_roster",
+        "title": "ID numbers on the roster",
+        "protection": "HMAC-SHA256 with a key outside the database; only the last 4 digits in clear",
+        "sql": "SELECT email, aadhaar_hmac, aadhaar_last4, college_id_hmac, college_id_last4 FROM voter_roster ORDER BY email LIMIT 5",
+        "secret": {"aadhaar_hmac", "college_id_hmac"},
+    },
+    {
+        "table": "voter_login_otps",
+        "title": "One-time login codes",
+        "protection": "SHA-256 hash of the code, expires in 5 minutes",
+        "sql": "SELECT voter_id, otp_hash, expires_at, consumed FROM voter_login_otps ORDER BY id DESC LIMIT 5",
+        "secret": {"otp_hash"},
+    },
+]
+
+
+def _cut(v, n: int = 60):
+    if v is None:
+        return None
+    s = str(v).replace("\n", " ")
+    return s if len(s) <= n else s[:n] + "…"
+
+
+@router.get("/admin/stored-data")
+def stored_data(_: None = Depends(admin_bearer)):
+    """Show exactly what the database file holds, so it can be demonstrated that nothing sensitive is readable."""
+    out = []
+    with get_connection(_db_path) as conn:
+        for v in _STORED_VIEWS:
+            rows = conn.execute(v["sql"]).fetchall()
+            total = conn.execute(f"SELECT COUNT(*) AS c FROM {v['table']}").fetchone()["c"]
+            cols = list(rows[0].keys()) if rows else [d.strip().split()[-1] for d in v["sql"].split("FROM")[0][6:].split(",")]
+            out.append(
+                {
+                    "table": v["table"],
+                    "title": v["title"],
+                    "protection": v["protection"],
+                    "columns": cols,
+                    "protected_columns": sorted(v["secret"]),
+                    "total": total,
+                    "rows": [[_cut(r[c]) for c in cols] for r in rows],
+                }
+            )
+    p = Path(_db_path).resolve()
+    return {"path": str(p), "size_bytes": p.stat().st_size, "tables": out}

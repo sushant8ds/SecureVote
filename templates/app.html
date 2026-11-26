@@ -7,7 +7,7 @@
   <title>{{ app_name }}</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
   <link rel="preload" href="/static/fonts/public-sans-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
-  <link rel="stylesheet" href="/static/css/app.css?v=ui-14" />
+  <link rel="stylesheet" href="/static/css/app.css?v=ui-16" />
 </head>
 <body>
 {% macro identity_fields() %}
@@ -159,9 +159,12 @@
 
     <!-- Voter -->
     <section id="view-voter" class="view hidden">
-      <div class="page-head">
-        <h1>Elections</h1>
-        <p class="lede" id="voter-welcome"></p>
+      <div class="page-head page-head-row">
+        <div>
+          <h1>Elections</h1>
+          <p class="lede" id="voter-welcome"></p>
+        </div>
+        <button type="button" class="btn" data-open-lab>Open security lab</button>
       </div>
 
       <div id="voter-key-banner" class="callout callout-warn hidden">
@@ -195,9 +198,12 @@
 
     <!-- Admin -->
     <section id="view-admin" class="view hidden">
-      <div class="page-head">
-        <h1>Administration</h1>
-        <p class="lede" id="admin-welcome-line"></p>
+      <div class="page-head page-head-row">
+        <div>
+          <h1>Administration</h1>
+          <p class="lede" id="admin-welcome-line"></p>
+        </div>
+        <button type="button" class="btn" data-open-lab>Open security lab</button>
       </div>
 
       <div id="admin-alert-banner" class="alert-banner hidden" role="alert">
@@ -212,12 +218,14 @@
         <button type="button" class="tab" role="tab" data-atab="requests">Access requests <span id="badge-approvals" class="count hidden">0</span></button>
         <button type="button" class="tab" role="tab" data-atab="alerts">Security alerts <span id="badge-alerts" class="count count-danger hidden">0</span></button>
         <button type="button" class="tab" role="tab" data-atab="roster">Voter roster</button>
+        <button type="button" class="tab" role="tab" data-atab="stored">Stored data</button>
         <button type="button" class="tab" role="tab" data-atab="create">New election</button>
       </div>
 
       <div id="a-panel-elections" class="panel"></div>
       <div id="a-panel-requests" class="panel hidden"></div>
       <div id="a-panel-alerts" class="panel hidden"></div>
+      <div id="a-panel-stored" class="panel hidden"></div>
       <div id="a-panel-roster" class="panel hidden">
         <div id="roster-list"></div>
         <details class="disclosure">
@@ -298,7 +306,7 @@
     <section id="view-lab" class="view hidden">
       <div class="page-head">
         <h1>Security lab</h1>
-        <p class="lede">Each card runs one attack from our threat model against this server. The defence named on the card stops it, and the administrator is alerted on the Security alerts tab.</p>
+        <p class="lede">Each card runs one attack against this server. The defence named on the card stops it, and the administrator is alerted on the Security alerts tab.</p>
       </div>
       <div class="lab-bar">
         <label class="field" id="lab-target-field">
@@ -351,6 +359,6 @@
   </template>
 
   <script src="/static/js/vendor/forge.min.js"></script>
-  <script defer src="/static/js/app.js?v=ui-13"></script>
+  <script defer src="/static/js/app.js?v=ui-16"></script>
 </body>
 </html>
