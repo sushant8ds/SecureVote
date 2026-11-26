@@ -107,6 +107,13 @@ CREATE TABLE IF NOT EXISTS identity_checks (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS login_failures (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  voter_id TEXT NOT NULL,
+  source_ip TEXT,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS security_alerts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT NOT NULL,

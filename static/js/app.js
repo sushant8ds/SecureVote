@@ -1046,7 +1046,7 @@ function resultBlock(res) {
 
 function aTab(name) {
   $$(".tab[data-atab]").forEach((b) => b.classList.toggle("is-active", b.dataset.atab === name));
-  for (const p of ["elections", "requests", "alerts", "roster", "create"]) {
+  for (const p of ["elections", "requests", "alerts", "roster", "stored", "create"]) {
     $(`#a-panel-${p}`).classList.toggle("hidden", p !== name);
   }
   loadAdminSummary();
@@ -1055,6 +1055,7 @@ function aTab(name) {
   if (name === "requests") return loadRequests();
   if (name === "alerts") return loadAlerts();
   if (name === "roster") return loadRoster();
+  if (name === "stored") return loadStored();
   initCreateForm();
   return undefined;
 }
@@ -1196,6 +1197,50 @@ async function loadAlerts() {
     );
   });
   panel.replaceChildren(bar, h("ul", { class: "alert-list" }, items));
+}
+
+/* ---------- Admin: what the database actually stores ---------- */
+
+async function loadStored() {
+  const panel = $("#a-panel-stored");
+  let data;
+  try {
+    data = await api("/api/admin/stored-data", { role: "admin" });
+  } catch (err) {
+    panel.replaceChildren(h("p", { class: "empty" }, err.message));
+    return;
+  }
+  const kb = Math.max(1, Math.round(data.size_bytes / 1024));
+  const blocks = data.tables.map((t) => {
+    const protectedCols = new Set(t.protected_columns);
+    const head = h("tr", null, t.columns.map((c) => h("th", { class: protectedCols.has(c) ? "col-protected" : null }, c)));
+    const body = t.rows.length
+      ? t.rows.map((r) =>
+          h(
+            "tr",
+            null,
+            r.map((v, i) => h("td", { class: protectedCols.has(t.columns[i]) ? "cell-cipher" : null }, v == null ? "—" : String(v))),
+          ),
+        )
+      : [h("tr", null, h("td", { colspan: String(t.columns.length), class: "meta" }, "No rows yet"))];
+    return h(
+      "section",
+      { class: "stored-block" },
+      h("h2", null, t.title, " ", h("code", { class: "stored-table" }, t.table)),
+      h("p", { class: "meta" }, `${t.protection} · ${plural(t.total, "row")}`),
+      h("div", { class: "table-wrap" }, h("table", { class: "stored-grid" }, h("thead", null, head), h("tbody", null, body))),
+    );
+  });
+  panel.replaceChildren(
+    h(
+      "p",
+      { class: "callout stored-intro" },
+      h("strong", null, "Database file: "),
+      h("code", null, data.path),
+      ` (${kb} KB). These rows are read live from that file. Highlighted columns are what an attacker who copied it would see: ciphertext and hashes, never votes, keys, passwords or ID numbers.`,
+    ),
+    ...blocks,
+  );
 }
 
 /* ---------- Admin: voter roster ---------- */
@@ -1753,6 +1798,36 @@ const ATTACKS = [
     },
   },
   {
+    key: "wronguser",
+    title: "Wrong user",
+    story: "Someone who isn't on the roster tries to sign in, then guesses a real voter's password.",
+    defence: "Roster check on every sign-in; wrong passwords counted per account",
+    form: "email",
+    blocker(ui) {
+      return ui.email.value.trim() ? null : "Enter the email of a registered voter to target.";
+    },
+    async run(log, ui) {
+      const victim = ui.email.value.trim().toLowerCase();
+      const outsider = "outsider@umsystem.edu";
+      const r1 = await rawApi("/api/login", { method: "POST", json: { voter_id: outsider, password: "letmein-123" } });
+      log("A stranger signs in", r1.status === 403 ? "blocked" : "exposed", [`${outsider} → ${r1.status} ${r1.detail}`]);
+      const lines = [];
+      let all401 = true;
+      for (let i = 1; i <= 3; i++) {
+        const guess = "guess-" + i + "-" + Math.random().toString(36).slice(2, 6);
+        const r = await rawApi("/api/login", { method: "POST", json: { voter_id: victim, password: guess } });
+        if (r.status !== 401) all401 = false;
+        lines.push(`Guess ${i} for ${victim} → ${r.status} ${r.detail.split(".")[0]}`);
+      }
+      log("Guess the voter's password three times", all401 ? "blocked" : "warn", lines);
+      if (r1.status !== 403 || !all401) return r1.ok ? "exposed" : "error";
+      log("The administrator is alerted", "blocked", [
+        "“Someone not on the roster tried to get in” and “Repeated wrong passwords” now show on the Security alerts tab.",
+      ]);
+      return "blocked";
+    },
+  },
+  {
     key: "sniff",
     title: "Sniffing campus Wi-Fi",
     story: "Record the bytes of a login as they cross the network and search them for the password.",
@@ -1802,13 +1877,12 @@ function renderLab() {
     let form = null;
     if (a.form) {
       ui.email = h("input", { type: "email", autocomplete: "off", placeholder: "voter@umsystem.edu" });
-      ui.password = h("input", { type: "password", autocomplete: "off" });
-      form = h(
-        "div",
-        { class: "lab-form" },
-        h("label", { class: "field" }, h("span", { class: "field-label" }, "Victim's email"), ui.email),
-        h("label", { class: "field" }, h("span", { class: "field-label" }, "Stolen password"), ui.password),
-      );
+      const fields = [h("label", { class: "field" }, h("span", { class: "field-label" }, "Victim's email"), ui.email)];
+      if (a.form !== "email") {
+        ui.password = h("input", { type: "password", autocomplete: "off" });
+        fields.push(h("label", { class: "field" }, h("span", { class: "field-label" }, "Stolen password"), ui.password));
+      }
+      form = h("div", { class: "lab-form" }, fields);
     }
     a.ui = ui;
     ui.btn.addEventListener("click", () => runAttack(a));
@@ -1871,8 +1945,9 @@ async function runAttack(a) {
 
 async function loadLab() {
   renderLab();
-  const otp = ATTACKS.find((a) => a.key === "otp").ui;
-  if (!otp.email.value) otp.email.value = localStorage.getItem(LS.voterId) || "";
+  for (const a of ATTACKS.filter((x) => x.form)) {
+    if (!a.ui.email.value) a.ui.email.value = localStorage.getItem(LS.voterId) || "";
+  }
   const sel = $("#lab-target");
   const hint = $("#lab-target-hint");
   lab.elections = [];
@@ -1897,11 +1972,18 @@ async function loadLab() {
   if (lab.targetId != null) sel.value = String(lab.targetId);
   const who = localStorage.getItem(LS.voterId);
   hint.textContent = !localStorage.getItem(LS.voterTok)
-    ? "Attacks 1–3 act as a signed-in voter. Sign in as a voter in this browser to run them; attacks 4–7 work from any session."
+    ? "Attacks 1–3 act as a signed-in voter. Sign in as a voter in this browser to run them; attacks 4–8 work from any session."
     : lab.elections.length
       ? `Attacks 1–3 act as ${who}. Rejected ballots never use up the real vote.`
       : `Attacks 1–3 act as ${who}, who has no approved, open election. Request access and approve it in Administration.`;
 }
+
+$$("[data-open-lab]").forEach((b) =>
+  b.addEventListener("click", () => {
+    showView("lab");
+    loadLab();
+  }),
+);
 
 $("#lab-target").addEventListener("change", (e) => {
   lab.targetId = e.target.value || null;

@@ -22,6 +22,8 @@ KINDS: dict[str, tuple[str, str]] = {
     "double_vote": ("Second vote attempt", "high"),
     "ballot_for_other_voter": ("Ballot submitted in another voter's name", "high"),
     "otp_bruteforce": ("Login code guessing", "high"),
+    "unknown_user": ("Someone not on the roster tried to get in", "medium"),
+    "password_guessing": ("Repeated wrong passwords", "high"),
     "identity_mismatch": ("Identity check failed", "medium"),
     "identity_lockout": ("Repeated identity check failures", "high"),
     "plaintext_http": ("Credentials sent over plain HTTP", "medium"),

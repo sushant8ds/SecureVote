@@ -401,3 +401,42 @@ def test_lab_endpoints_need_sign_in_and_raise_alerts(client):
     a = alerts(client)[0]
     assert a["kind"] == "db_theft" and a["detected_by"] == "Security lab probe"
     assert a["actor"] == "lab run by admin admin"
+
+
+def test_unknown_user_sign_in_and_register_alert_admin(client):
+    r = client.post("/api/login", json={"voter_id": "outsider@umsystem.edu", "password": "whatever1"})
+    assert r.status_code == 403
+    r = client.post(
+        "/api/register",
+        json={"voter_id": "outsider@umsystem.edu", "password": "password12", **identity_for(EMAIL)},
+    )
+    assert r.status_code == 403
+    a = [x for x in alerts(client) if x["kind"] == "unknown_user"]
+    # Same person within a minute: one alert with a counter.
+    assert len(a) == 1 and a[0]["count"] == 2 and a[0]["actor"] == "outsider@umsystem.edu"
+    # The precheck (typing an email on the sign-up page) does not raise an alert.
+    client.post("/api/register/precheck", json={"voter_id": "someone@umsystem.edu"})
+    assert [x["count"] for x in alerts(client) if x["kind"] == "unknown_user"] == [2]
+
+
+def test_repeated_wrong_passwords_alert_admin(client):
+    register(client)
+    for i in range(2):
+        assert client.post("/api/login", json={"voter_id": EMAIL, "password": f"wrong-{i}"}).status_code == 401
+    assert not [x for x in alerts(client) if x["kind"] == "password_guessing"]
+    client.post("/api/login", json={"voter_id": EMAIL, "password": "wrong-3"})
+    a = [x for x in alerts(client) if x["kind"] == "password_guessing"]
+    assert len(a) == 1 and a[0]["severity"] == "high" and "3 wrong passwords" in a[0]["detail"]
+
+
+def test_admin_stored_data_shows_only_ciphertext(client):
+    register(client)
+    assert client.get("/api/admin/stored-data").status_code == 401
+    d = client.get("/api/admin/stored-data", headers=admin_headers(client)).json()
+    assert d["path"].endswith("test_voting.db")
+    t = {x["table"]: x for x in d["tables"]}
+    assert set(t) == {"election_votes", "elections", "voters", "voter_roster", "voter_login_otps"}
+    pw = t["voters"]["rows"][0][t["voters"]["columns"].index("password_hash")]
+    assert pw.startswith("$2b$12$")
+    dump = str(d)
+    assert aadhaar_for(EMAIL) not in dump and "password12" not in dump

@@ -1080,6 +1080,64 @@ td.actions .btn + .btn {
   color: var(--surface);
 }
 
+/* ---------- Admin: stored data ---------- */
+
+.stored-intro {
+  margin-bottom: 32px;
+  overflow-wrap: anywhere;
+}
+
+.stored-block + .stored-block {
+  margin-top: 40px;
+}
+
+.stored-block h2 {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.stored-table {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--ink-3);
+}
+
+.stored-block > .meta {
+  margin: 4px 0 12px;
+}
+
+.stored-grid {
+  font-size: 0.8125rem;
+}
+
+.stored-grid th.col-protected {
+  color: var(--accent);
+}
+
+.stored-grid td {
+  padding-top: 10px;
+  padding-bottom: 10px;
+  white-space: nowrap;
+}
+
+.stored-grid td.cell-cipher {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--accent-strong);
+  background: var(--accent-tint);
+}
+
+/* ---------- Page head with an action ---------- */
+
+.page-head-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
 /* ---------- Header: current page ---------- */
 
 .header-nav .btn-link[aria-current="page"] {
